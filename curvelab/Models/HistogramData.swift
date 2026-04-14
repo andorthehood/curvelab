@@ -11,8 +11,8 @@ struct HistogramData {
     let rawGreen: [Float]
     let rawBlue: [Float]
 
-    static func compute(from image: CIImage) -> HistogramData? {
-        let context = CIContext(options: [.useSoftwareRenderer: false])
+    static func compute(from image: CIImage, context: CIContext? = nil) -> HistogramData? {
+        let context = context ?? CIContext(options: [.useSoftwareRenderer: false])
 
         // Scale down for faster histogram computation
         let maxDim: CGFloat = 1024

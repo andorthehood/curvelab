@@ -43,13 +43,13 @@ struct ContentView: View {
                     CurveEditorView(curves: viewModel.curves, histogram: viewModel.histogram)
                         .frame(maxWidth: .infinity)
 
-                    if let histogram = viewModel.histogram {
+                    if let outputHistogram = viewModel.outputHistogram {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Output")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             ResultHistogramView(
-                                histogram: histogram.remapped(through: viewModel.curves),
+                                histogram: outputHistogram,
                                 activeChannel: viewModel.curves.activeChannel
                             )
                         }
