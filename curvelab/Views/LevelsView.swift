@@ -4,6 +4,9 @@ import SwiftUI
 /// black point (left) and white point (right).  The handles operate in the
 /// 0…1 normalised domain matching the float32 cache values.
 ///
+/// A range strip sits above the histogram showing the [blackPoint, whitePoint]
+/// span as a segment; dragging it shifts both handles together.
+///
 /// An additional downward-pointing handle at the top edge mirrors the black-point
 /// position but also adjusts all curves to preserve output values when dragged.
 /// Supply `onLinkedBlackPointChanged` to opt in to that behaviour.
@@ -20,35 +23,68 @@ struct LevelsView: View {
     private let minimumSpan: Double = 0.01
     private let handleWidth: CGFloat = 10
     private let viewHeight: CGFloat = 50
+    private let stripHeight: CGFloat = 14
     private let hitSlop: CGFloat = 18
 
     // Which handle is being dragged?
     @State private var dragging: Handle? = nil
+    // Captured start values for range strip drag
+    @State private var rangeStartBP: Double? = nil
+    @State private var rangeStartWP: Double? = nil
 
     private enum Handle { case black, white, blackLinked }
 
     var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            ZStack(alignment: .topLeading) {
-                // Histogram canvas
-                Canvas { ctx, size in
-                    drawHistogram(ctx: ctx, size: size)
-                    drawHandles(ctx: ctx, size: size)
-                }
-                .frame(height: viewHeight)
+        VStack(spacing: 0) {
+            // Range strip — drag to shift black and white point together
+            GeometryReader { stripGeo in
+                let w = stripGeo.size.width
+                let bpX = CGFloat(blackPoint) * w
+                let wpX = CGFloat(whitePoint) * w
 
-                // Single transparent drag layer
-                Color.clear
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in onDrag(value: value, width: w) }
-                            .onEnded   { _ in dragging = nil }
-                    )
+                ZStack(alignment: .topLeading) {
+                    Canvas { ctx, size in
+                        ctx.fill(Path(CGRect(origin: .zero, size: size)),
+                                 with: .color(Color(white: 0.15)))
+                        let segRect = CGRect(x: bpX, y: 2,
+                                             width: max(0, wpX - bpX),
+                                             height: size.height - 4)
+                        ctx.fill(Path(segRect), with: .color(Color(white: 0.55).opacity(0.55)))
+                        ctx.stroke(Path(CGRect(origin: .zero, size: size)),
+                                   with: .color(Color(white: 0.3)), lineWidth: 1)
+                    }
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 1)
+                                .onChanged { value in onRangeDrag(value: value, width: w) }
+                                .onEnded   { _ in rangeStartBP = nil; rangeStartWP = nil }
+                        )
+                }
             }
+            .frame(height: stripHeight)
+
+            // Histogram + handles
+            GeometryReader { geo in
+                let w = geo.size.width
+                ZStack(alignment: .topLeading) {
+                    Canvas { ctx, size in
+                        drawHistogram(ctx: ctx, size: size)
+                        drawHandles(ctx: ctx, size: size)
+                    }
+                    .frame(height: viewHeight)
+
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { value in onDrag(value: value, width: w) }
+                                .onEnded   { _ in dragging = nil }
+                        )
+                }
+            }
+            .frame(height: viewHeight)
         }
-        .frame(height: viewHeight)
     }
 
     // MARK: - Drawing
@@ -167,7 +203,21 @@ struct LevelsView: View {
         return path
     }
 
-    // MARK: - Gesture
+    // MARK: - Gestures
+
+    private func onRangeDrag(value: DragGesture.Value, width: CGFloat) {
+        guard width > 0 else { return }
+        if rangeStartBP == nil {
+            rangeStartBP = blackPoint
+            rangeStartWP = whitePoint
+        }
+        guard let startBP = rangeStartBP, let startWP = rangeStartWP else { return }
+        let delta = Double((value.location.x - value.startLocation.x) / width)
+        let span  = startWP - startBP
+        let newBP = max(0, min(1 - span, startBP + delta))
+        blackPoint = newBP
+        whitePoint = newBP + span
+    }
 
     private func onDrag(value: DragGesture.Value, width: CGFloat) {
         guard width > 0 else { return }

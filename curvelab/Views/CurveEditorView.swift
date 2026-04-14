@@ -4,46 +4,111 @@ struct CurveEditorView: View {
     @ObservedObject var curves: CurveModel
     var histogram: HistogramData?
     @State private var draggingPointID: UUID?
-    /// Captures each point's X at the moment an ⌥-drag begins, so we can
-    /// apply a clean delta from start rather than accumulating per-frame drift.
+    /// Captures each point's X at the moment an all-points strip drag begins.
     @State private var shiftStartXs: [UUID: Double]?
+    /// Captures each top-half point's X at the moment a top-strip drag begins.
+    @State private var topStartXs: [UUID: Double]?
+    /// Captures each bottom-half point's X at the moment a bottom-strip drag begins.
+    @State private var bottomStartXs: [UUID: Double]?
 
     private let handleRadius: CGFloat = 6
     private let hitRadius: CGFloat = 14
 
     var body: some View {
+        VStack(spacing: 0) {
+            // All-points shift strip
+            halfStrip(top: true, allPoints: true)
+
+            // Top-half shift strip (points with y ≥ 0.5)
+            halfStrip(top: true, allPoints: false)
+
+            // Curve canvas
+            GeometryReader { geo in
+                let size = min(geo.size.width, geo.size.height)
+                let origin = CGPoint(
+                    x: (geo.size.width - size) / 2,
+                    y: (geo.size.height - size) / 2
+                )
+
+                ZStack(alignment: .topLeading) {
+                    Canvas { context, _ in
+                        let rect = CGRect(origin: origin, size: CGSize(width: size, height: size))
+                        drawBackground(context: context, rect: rect)
+                        drawHistogram(context: context, rect: rect)
+                        drawInactiveCurves(context: context, rect: rect)
+                        drawActiveCurve(context: context, rect: rect)
+                        drawHandles(context: context, rect: rect)
+                    }
+                    .onTapGesture(count: 2) { location in
+                        onDoubleClick(location: location, size: size, origin: origin)
+                    }
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                onDrag(value: value, size: size, origin: origin)
+                            }
+                            .onEnded { _ in draggingPointID = nil }
+                    )
+                }
+            }
+            .aspectRatio(1, contentMode: .fit)
+
+            // Bottom-half shift strip (points with y < 0.5)
+            halfStrip(top: false, allPoints: false)
+        }
+    }
+
+    /// Builds one of the three shift strips.
+    /// - Parameters:
+    ///   - top: true → strip appears above the canvas; false → below.
+    ///   - allPoints: true → operates on all points (the global strip); false → operates on the
+    ///     top half (y ≥ 0.5) when `top` is true, or the bottom half (y < 0.5) when `top` is false.
+    @ViewBuilder
+    private func halfStrip(top: Bool, allPoints: Bool) -> some View {
         GeometryReader { geo in
-            let size = min(geo.size.width, geo.size.height)
-            let origin = CGPoint(
-                x: (geo.size.width - size) / 2,
-                y: (geo.size.height - size) / 2
-            )
+            let w = geo.size.width
+            let pts = curves.activeCurve.sortedPoints
+            let subset = allPoints ? pts : pts.filter { top ? $0.y >= 0.5 : $0.y < 0.5 }
+            let leftX  = CGFloat(subset.min(by: { $0.x < $1.x })?.x ?? 0) * w
+            let rightX = CGFloat(subset.max(by: { $0.x < $1.x })?.x ?? 0) * w
+            let segColor = channelColor(curves.activeChannel)
 
             ZStack(alignment: .topLeading) {
-                Canvas { context, canvasSize in
-                    let rect = CGRect(origin: origin, size: CGSize(width: size, height: size))
-                    drawBackground(context: context, rect: rect)
-                    drawHistogram(context: context, rect: rect)
-                    drawInactiveCurves(context: context, rect: rect)
-                    drawActiveCurve(context: context, rect: rect)
-                    drawHandles(context: context, rect: rect)
+                Canvas { ctx, size in
+                    ctx.fill(Path(CGRect(origin: .zero, size: size)),
+                             with: .color(Color(white: 0.15)))
+                    if !subset.isEmpty {
+                        let segRect = CGRect(x: leftX, y: 2,
+                                             width: max(0, rightX - leftX),
+                                             height: size.height - 4)
+                        let opacity: Double = allPoints ? 0.45 : 0.3
+                        ctx.fill(Path(segRect), with: .color(segColor.opacity(opacity)))
+                    }
+                    ctx.stroke(Path(CGRect(origin: .zero, size: size)),
+                               with: .color(Color(white: 0.3)), lineWidth: 1)
                 }
-                .onTapGesture(count: 2) { location in
-                    onDoubleClick(location: location, size: size, origin: origin)
-                }
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            onDrag(value: value, size: size, origin: origin)
-                        }
-                        .onEnded { _ in
-                            draggingPointID = nil
-                            shiftStartXs = nil
-                        }
-                )
+                Color.clear
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 1)
+                            .onChanged { value in
+                                if allPoints {
+                                    onStripDrag(value: value, width: w)
+                                } else if top {
+                                    onHalfStripDrag(value: value, width: w, topHalf: true)
+                                } else {
+                                    onHalfStripDrag(value: value, width: w, topHalf: false)
+                                }
+                            }
+                            .onEnded { _ in
+                                if allPoints { shiftStartXs = nil }
+                                else if top  { topStartXs = nil }
+                                else         { bottomStartXs = nil }
+                            }
+                    )
             }
         }
-        .aspectRatio(1, contentMode: .fit)
+        .frame(height: 14)
     }
 
     // MARK: - Drawing
@@ -196,31 +261,48 @@ struct CurveEditorView: View {
 
     // MARK: - Gestures
 
-    private func onDrag(value: DragGesture.Value, size: CGFloat, origin: CGPoint) {
-        // ⌥ held — translate all points horizontally together
-        if NSEvent.modifierFlags.contains(.option) {
-            if shiftStartXs == nil {
-                shiftStartXs = Dictionary(
-                    uniqueKeysWithValues: curves.activeCurve.points.map { ($0.id, $0.x) }
-                )
-            }
-            guard let startXs = shiftStartXs else { return }
-            // Compute delta from the drag origin so there's no per-frame accumulation drift.
-            // Use the median point as the reference to get a single clean delta.
-            let deltaX = Double((value.location.x - value.startLocation.x) / size)
-            // Restore each point to its captured start X then apply delta — bypasses
-            // movePoint's neighbour-clamping which would cause bunching on large shifts.
-            for i in curves.activeCurve.points.indices {
-                let id = curves.activeCurve.points[i].id
-                if let originX = startXs[id] {
-                    curves.activeCurve.points[i].x = max(0, min(1, originX + deltaX))
-                }
-            }
-            return
+    private func onStripDrag(value: DragGesture.Value, width: CGFloat) {
+        guard width > 0 else { return }
+        if shiftStartXs == nil {
+            shiftStartXs = Dictionary(
+                uniqueKeysWithValues: curves.activeCurve.points.map { ($0.id, $0.x) }
+            )
         }
+        guard let startXs = shiftStartXs else { return }
+        let deltaX = Double((value.location.x - value.startLocation.x) / width)
+        for i in curves.activeCurve.points.indices {
+            let id = curves.activeCurve.points[i].id
+            if let originX = startXs[id] {
+                curves.activeCurve.points[i].x = max(0, min(1, originX + deltaX))
+            }
+        }
+    }
 
-        // Normal single-point drag
-        shiftStartXs = nil
+    private func onHalfStripDrag(value: DragGesture.Value, width: CGFloat, topHalf: Bool) {
+        guard width > 0 else { return }
+        // Select which captured-start dictionary to use
+        let captured: [UUID: Double]?
+        if topHalf { captured = topStartXs } else { captured = bottomStartXs }
+
+        if captured == nil {
+            let snap = Dictionary(
+                uniqueKeysWithValues: curves.activeCurve.points
+                    .filter { topHalf ? $0.y >= 0.5 : $0.y < 0.5 }
+                    .map { ($0.id, $0.x) }
+            )
+            if topHalf { topStartXs = snap } else { bottomStartXs = snap }
+        }
+        guard let startXs = topHalf ? topStartXs : bottomStartXs else { return }
+        let deltaX = Double((value.location.x - value.startLocation.x) / width)
+        for i in curves.activeCurve.points.indices {
+            let id = curves.activeCurve.points[i].id
+            if let originX = startXs[id] {
+                curves.activeCurve.points[i].x = max(0, min(1, originX + deltaX))
+            }
+        }
+    }
+
+    private func onDrag(value: DragGesture.Value, size: CGFloat, origin: CGPoint) {
         let rect = CGRect(origin: origin, size: CGSize(width: size, height: size))
         let norm = screenToNormalized(value.location, size: size, origin: origin)
 

@@ -23,7 +23,7 @@ A macOS app for editing tone curves on 48-bit DNG files from film scanners, with
 - **Natural cubic spline** interpolation (C² continuity, Thomas algorithm)
 - **Add point** — click and drag anywhere on the curve; the new point snaps to the spline at that x position
 - **Delete point** — double-click any control point
-- **⌥-drag** — hold Option while dragging to shift all control points on the active channel horizontally together; bypasses neighbour-clamping so relative spacing is preserved
+- **Shift strip** — narrow draggable bar above the curve canvas; shows the active curve's point span as a coloured segment; drag left/right to shift all control points horizontally together; bypasses neighbour-clamping so relative spacing is preserved; dragging past the edge and back restores original positions
 - **Input histogram** displayed behind the curve editor, showing the post-levels pixel distribution aligned to the curve's input axis
 - **Output histogram** showing rendered pixel values after curves are applied, updated live
 
@@ -63,7 +63,7 @@ A macOS app for editing tone curves on 48-bit DNG files from film scanners, with
 | Add curve point | Click and drag anywhere on the curve |
 | Move curve point | Drag any control point |
 | Delete curve point | Double-click a control point |
-| Shift all points horizontally | ⌥-drag anywhere on the curve |
+| Shift all points horizontally | Drag the shift strip above the curve canvas |
 | Switch channel | RGB / R / G / B picker |
 | Absorb curve black point into levels | Select reference channel → "Absorb BP" button |
 | Show crop overlay | "Show Crop" checkbox |
@@ -147,6 +147,7 @@ previewImage (lazy CIImage — LUT applied to cache)
 - [`docs/pipeline.md`](docs/pipeline.md) — detailed pipeline diagram with cache-rebuild and LUT-rebuild trigger tables
 - [`docs/absorb-black-point.md`](docs/absorb-black-point.md) — technical explanation of the Absorb BP operation with proof of output equivalence
 - [`docs/linked-black-point.md`](docs/linked-black-point.md) — technical explanation of the linked black-point handle, its cap, and its relationship to Absorb BP
+- [`docs/curve-shift-strip.md`](docs/curve-shift-strip.md) — how the shift strip works, including the start-captured delta algorithm and jump-back behaviour
 
 ## Requirements
 
