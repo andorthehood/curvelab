@@ -14,7 +14,7 @@ struct ContentView: View {
                         ProgressView("Loading…")
                             .foregroundStyle(.white)
                     } else if viewModel.previewImage != nil {
-                        ImagePreviewView(image: viewModel.previewImage, hdrEnabled: viewModel.hdrPreview)
+                        ImagePreviewView(image: viewModel.previewImage)
                     } else {
                         VStack(spacing: 12) {
                             Image(systemName: "photo.on.rectangle")
@@ -55,8 +55,9 @@ struct ContentView: View {
                         }
                     }
 
-                    Toggle("HDR Preview", isOn: $viewModel.hdrPreview)
+                    Toggle("Linear Export", isOn: $viewModel.exportLinear)
                         .toggleStyle(.checkbox)
+                        .disabled(viewModel.originalImage == nil)
 
                     Toggle("Negative", isOn: $viewModel.isNegative)
                         .toggleStyle(.checkbox)

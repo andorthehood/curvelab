@@ -14,10 +14,10 @@ class ImageViewModel: ObservableObject {
     @Published var histogram: HistogramData?
     @Published var outputHistogram: HistogramData?
     @Published var rotationAngle: Double = 0
-    @Published var hdrPreview = false
     @Published var cropState: CropState = CropState(rect: .zero, isActive: false)
     @Published var showCropOverlay = false
     @Published var isNegative = false
+    @Published var exportLinear = false
 
     var imageSize: CGSize {
         guard let ext = cachedImage?.extent else { return .zero }
@@ -245,13 +245,32 @@ class ImageViewModel: ObservableObject {
 
         isLoading = true
         let imageToExport = previewImage
-        let context = ciContext
+        let linear = exportLinear
         Task.detached {
-            let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
-            try? context.writeJPEGRepresentation(
-                of: imageToExport, to: url, colorSpace: colorSpace,
-                options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.92]
-            )
+            // Use a context with linearSRGB working space — same as the SDR Metal preview
+            // context — so the untagged float32 buffer values are interpreted as linear
+            // and gamma-encoded correctly when writing to sRGB.
+            let exportContext = CIContext(options: [
+                .useSoftwareRenderer: false,
+                .workingColorSpace: CGColorSpace(name: CGColorSpace.linearSRGB)!
+            ])
+            let outputColorSpace = CGColorSpace(name: linear
+                ? CGColorSpace.linearSRGB
+                : CGColorSpace.sRGB)!
+            guard let cgImage = exportContext.createCGImage(
+                imageToExport,
+                from: imageToExport.extent,
+                format: .RGBA8,
+                colorSpace: outputColorSpace
+            ) else {
+                await MainActor.run { self.isLoading = false }
+                return
+            }
+            if let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) {
+                CGImageDestinationAddImage(dest, cgImage,
+                    [kCGImageDestinationLossyCompressionQuality: 0.92] as CFDictionary)
+                CGImageDestinationFinalize(dest)
+            }
             await MainActor.run { self.isLoading = false }
         }
     }
