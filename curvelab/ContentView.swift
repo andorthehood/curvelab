@@ -50,7 +50,7 @@ struct ContentView: View {
                                 .foregroundStyle(.secondary)
                             ResultHistogramView(
                                 histogram: outputHistogram,
-                                activeChannel: viewModel.curves.activeChannel
+                                activeChannel: .rgb
                             )
                         }
                     }
