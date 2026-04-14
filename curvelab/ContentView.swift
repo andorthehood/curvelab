@@ -4,7 +4,6 @@ struct ContentView: View {
     @StateObject private var viewModel = ImageViewModel()
 
     @State private var sidebarWidth: CGFloat = 320
-    @State private var dragStartWidth: CGFloat? = nil
 
     private let minSidebarWidth: CGFloat = 260
     private let minImageWidth:   CGFloat = 280
@@ -13,10 +12,12 @@ struct ContentView: View {
         GeometryReader { geo in
             let clampedSidebar = max(minSidebarWidth,
                                     min(geo.size.width - minImageWidth, sidebarWidth))
+            let dividerX = geo.size.width - clampedSidebar  // left edge of divider in layout space
+
+            ZStack(alignment: .topLeading) {
             HStack(spacing: 0) {
                 // Left: Image preview + crop overlay
-                let previewSize = CGSize(width: geo.size.width - clampedSidebar - 6,
-                                        height: geo.size.height)
+                let previewSize = CGSize(width: dividerX - 6, height: geo.size.height)
                 ZStack {
                     Color(white: 0.12)
                     if viewModel.isLoading {
@@ -42,28 +43,14 @@ struct ContentView: View {
                         )
                     }
                 }
-                .frame(width: geo.size.width - clampedSidebar - 6)
+                .frame(width: dividerX - 6)
 
-                // Draggable divider
+                // Visual divider — no interaction, just appearance
                 ZStack {
-                    Color(white: 0.18).frame(width: 6)
+                    Color(white: 0.18)
                     Color(white: 0.3).frame(width: 1)
                 }
                 .frame(width: 6)
-                .onHover { hovering in
-                    if hovering { NSCursor.resizeLeftRight.push() }
-                    else        { NSCursor.pop() }
-                }
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            if dragStartWidth == nil { dragStartWidth = clampedSidebar }
-                            let newWidth = (dragStartWidth ?? clampedSidebar) - value.translation.width
-                            sidebarWidth = max(minSidebarWidth,
-                                               min(geo.size.width - minImageWidth, newWidth))
-                        }
-                        .onEnded { _ in dragStartWidth = nil }
-                )
 
                 // Right: editing panel — ordered to match the processing pipeline
                 ScrollView(.vertical, showsIndicators: true) {
@@ -179,7 +166,29 @@ struct ContentView: View {
                     .padding()
                 }
                 .frame(width: clampedSidebar)
-            }
+            } // HStack
+
+            // Transparent drag strip — lives in the stable ZStack coordinate space
+            // so value.location.x never shifts as the divider moves.
+            Color.clear
+                .frame(width: 12, height: geo.size.height)
+                .contentShape(Rectangle())
+                .position(x: dividerX - 3, y: geo.size.height / 2)
+                .onHover { hovering in
+                    if hovering { NSCursor.resizeLeftRight.push() }
+                    else        { NSCursor.pop() }
+                }
+                .gesture(
+                    DragGesture(minimumDistance: 0, coordinateSpace: .named("layout"))
+                        .onChanged { value in
+                            let newWidth = geo.size.width - value.location.x
+                            sidebarWidth = max(minSidebarWidth,
+                                               min(geo.size.width - minImageWidth, newWidth))
+                        }
+                )
+
+            } // ZStack
+            .coordinateSpace(name: "layout")
         }
         .navigationTitle(viewModel.fileName)
         .toolbar {
