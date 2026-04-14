@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreImage
+import CoreVideo
 import Combine
 import UniformTypeIdentifiers
 
@@ -12,12 +13,16 @@ class ImageViewModel: ObservableObject {
     @Published var fileName = "CurveLab"
     @Published var histogram: HistogramData?
     @Published var rotationAngle: Double = 0 // degrees: 0, 90, 180, 270
+    @Published var hdrPreview = false
+
+    // Cached pixel buffer of the (possibly rotated) decoded original.
+    // Curve adjustments apply only to this — no DNG re-decode on every drag.
+    private var cachedImage: CIImage?
 
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
     private var cancellables = Set<AnyCancellable>()
 
     init() {
-        // Subscribe to curve changes with debounce for live preview
         curves.objectWillChange
             .debounce(for: .milliseconds(16), scheduler: RunLoop.main)
             .sink { [weak self] _ in
@@ -37,37 +42,59 @@ class ImageViewModel: ObservableObject {
         isLoading = true
         fileName = url.deletingPathExtension().lastPathComponent
 
-        Task.detached { [weak self] in
-            let image = DNGLoader.load(url: url)
-            let histData = image.flatMap { HistogramData.compute(from: $0) }
+        let context = ciContext
+        Task.detached {
+            guard let decoded = DNGLoader.load(url: url) else {
+                await MainActor.run { self.isLoading = false }
+                return
+            }
+            // Render decoded DNG into a float32 pixel buffer once
+            let cached = Self.renderToBuffer(decoded, context: context)
+            let histData = cached.flatMap { HistogramData.compute(from: $0) }
             await MainActor.run {
-                self?.originalImage = image
-                self?.histogram = histData
-                self?.curves.reset()
-                self?.updatePreview()
-                self?.isLoading = false
+                self.originalImage = decoded
+                self.cachedImage = cached
+                self.rotationAngle = 0
+                self.histogram = histData
+                self.curves.reset()
+                self.updatePreview()
+                self.isLoading = false
             }
         }
     }
 
     func updatePreview() {
-        guard let originalImage else {
+        guard let cachedImage else {
             previewImage = nil
             return
         }
-        let curved = LUTGenerator.applyFilter(to: originalImage, curves: curves)
-        previewImage = rotateImage(curved)
+        previewImage = LUTGenerator.applyFilter(to: cachedImage, curves: curves)
     }
 
     func rotateLeft() {
         rotationAngle = (rotationAngle - 90).truncatingRemainder(dividingBy: 360)
         if rotationAngle < 0 { rotationAngle += 360 }
-        updatePreview()
+        rebuildCache()
     }
 
     func rotateRight() {
         rotationAngle = (rotationAngle + 90).truncatingRemainder(dividingBy: 360)
-        updatePreview()
+        rebuildCache()
+    }
+
+    private func rebuildCache() {
+        guard let originalImage else { return }
+        isLoading = true
+        let rotated = rotateImage(originalImage)
+        let context = ciContext
+        Task.detached {
+            let cached = Self.renderToBuffer(rotated, context: context)
+            await MainActor.run {
+                self.cachedImage = cached
+                self.updatePreview()
+                self.isLoading = false
+            }
+        }
     }
 
     private func rotateImage(_ image: CIImage) -> CIImage {
@@ -76,10 +103,42 @@ class ImageViewModel: ObservableObject {
         let extent = image.extent
         let cx = extent.midX
         let cy = extent.midY
-        return image
+        let rotated = image
             .transformed(by: CGAffineTransform(translationX: -cx, y: -cy))
             .transformed(by: CGAffineTransform(rotationAngle: CGFloat(radians)))
             .transformed(by: CGAffineTransform(translationX: cx, y: cy))
+        let newExtent = rotated.extent
+        return rotated.transformed(by: CGAffineTransform(
+            translationX: -newExtent.minX,
+            y: -newExtent.minY
+        ))
+    }
+
+    /// Renders a CIImage into a float32 CVPixelBuffer and returns a CIImage backed by it.
+    /// This materialises the lazy CoreImage chain (including DNG decode) into actual pixels.
+    private nonisolated static func renderToBuffer(_ image: CIImage, context: CIContext) -> CIImage? {
+        let extent = image.extent
+        guard extent.width > 0, extent.height > 0 else { return nil }
+
+        let width = Int(extent.width)
+        let height = Int(extent.height)
+
+        var buffer: CVPixelBuffer?
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_128RGBAFloat,
+            kCVPixelBufferWidthKey: width,
+            kCVPixelBufferHeightKey: height,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as [CFString: Any]
+        ]
+        let status = CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                                         kCVPixelFormatType_128RGBAFloat, attrs as CFDictionary, &buffer)
+        guard status == kCVReturnSuccess, let buffer else { return nil }
+
+        context.render(image, to: buffer,
+                       bounds: CGRect(x: 0, y: 0, width: width, height: height),
+                       colorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB))
+
+        return CIImage(cvPixelBuffer: buffer)
     }
 
     func exportJPG() {
@@ -103,9 +162,7 @@ class ImageViewModel: ObservableObject {
                 colorSpace: colorSpace,
                 options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.92]
             )
-            await MainActor.run { [weak self] in
-                self?.isLoading = false
-            }
+            await MainActor.run { self.isLoading = false }
         }
     }
 
