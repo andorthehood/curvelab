@@ -24,14 +24,6 @@ struct EditingState: Codable {
         var cgRect: CGRect { CGRect(x: x, y: y, width: width, height: height) }
     }
 
-    struct CodableCurves: Codable {
-        var rgb, red, green, blue: [Point]
-    }
-
-    struct Point: Codable {
-        var x, y: Double
-    }
-
     // MARK: - Codable with backward-compatible defaults for new fields
 
     enum CodingKeys: String, CodingKey {
@@ -60,21 +52,13 @@ struct EditingState: Codable {
         self.appliedCropRect = appliedCropRect.map { CodableRect($0) }
         self.inputBlackPoint = inputBlackPoint
         self.inputWhitePoint = inputWhitePoint
-        self.curves = CodableCurves(
-            rgb:   curves.rgb.points.map   { Point(x: $0.x, y: $0.y) },
-            red:   curves.red.points.map   { Point(x: $0.x, y: $0.y) },
-            green: curves.green.points.map { Point(x: $0.x, y: $0.y) },
-            blue:  curves.blue.points.map  { Point(x: $0.x, y: $0.y) }
-        )
+        self.curves = CodableCurves(from: curves)
     }
 
     // MARK: - Apply to live model
 
     func apply(to curveModel: CurveModel) {
-        curveModel.rgb   = ChannelCurve(points: curves.rgb.map   { CurveControlPoint(x: $0.x, y: $0.y) })
-        curveModel.red   = ChannelCurve(points: curves.red.map   { CurveControlPoint(x: $0.x, y: $0.y) })
-        curveModel.green = ChannelCurve(points: curves.green.map { CurveControlPoint(x: $0.x, y: $0.y) })
-        curveModel.blue  = ChannelCurve(points: curves.blue.map  { CurveControlPoint(x: $0.x, y: $0.y) })
+        curves.apply(to: curveModel)
     }
 }
 

@@ -3,10 +3,18 @@ import SwiftUI
 /// Compact input-levels control: a histogram with two draggable handles for
 /// black point (left) and white point (right).  The handles operate in the
 /// 0…1 normalised domain matching the float32 cache values.
+///
+/// An additional downward-pointing handle at the top edge mirrors the black-point
+/// position but also adjusts all curves to preserve output values when dragged.
+/// Supply `onLinkedBlackPointChanged` to opt in to that behaviour.
 struct LevelsView: View {
     @Binding var blackPoint: Double
     @Binding var whitePoint: Double
     var histogram: HistogramData?
+    /// Called with the new black-point value when the linked (top) handle is dragged.
+    var onLinkedBlackPointChanged: ((Double) -> Void)? = nil
+    /// Hard cap for the linked handle — dragging past this would crush the curve's leftmost point.
+    var linkedBlackPointMax: Double = 1.0
 
     /// Minimum gap between handles (in normalised units)
     private let minimumSpan: Double = 0.01
@@ -17,7 +25,7 @@ struct LevelsView: View {
     // Which handle is being dragged?
     @State private var dragging: Handle? = nil
 
-    private enum Handle { case black, white }
+    private enum Handle { case black, white, blackLinked }
 
     var body: some View {
         GeometryReader { geo in
@@ -92,13 +100,35 @@ struct LevelsView: View {
         let bpX = CGFloat(blackPoint) * size.width
         let wpX = CGFloat(whitePoint) * size.width
 
-        // Black-point handle (downward triangle at bottom, dark fill)
-        drawHandle(ctx: ctx, x: bpX, height: h, isBlack: true)
-        // White-point handle (downward triangle at bottom, light fill)
-        drawHandle(ctx: ctx, x: wpX, height: h, isBlack: false)
+        // Linked black-point handle — downward triangle at top
+        if onLinkedBlackPointChanged != nil {
+            drawTopHandle(ctx: ctx, x: bpX)
+        }
+        // Black-point handle — upward triangle at bottom, dark fill
+        drawBottomHandle(ctx: ctx, x: bpX, height: h, isBlack: true)
+        // White-point handle — upward triangle at bottom, light fill
+        drawBottomHandle(ctx: ctx, x: wpX, height: h, isBlack: false)
     }
 
-    private func drawHandle(ctx: GraphicsContext, x: CGFloat, height: CGFloat, isBlack: Bool) {
+    private func drawTopHandle(ctx: GraphicsContext, x: CGFloat) {
+        let half = handleWidth / 2
+        // Vertical tick — top quarter only, so it doesn't clash with the bottom handle's tick
+        var line = Path()
+        line.move(to: CGPoint(x: x, y: 1))
+        line.addLine(to: CGPoint(x: x, y: viewHeight * 0.35))
+        ctx.stroke(line, with: .color(Color(white: 0.5)), lineWidth: 1.5)
+
+        // Downward-pointing triangle at top
+        var tri = Path()
+        tri.move(to: CGPoint(x: x - half, y: 1))
+        tri.addLine(to: CGPoint(x: x + half, y: 1))
+        tri.addLine(to: CGPoint(x: x, y: 1 + half * 1.4))
+        tri.closeSubpath()
+        ctx.fill(tri, with: .color(Color(white: 0.35)))
+        ctx.stroke(tri, with: .color(Color(white: 0.65)), lineWidth: 1)
+    }
+
+    private func drawBottomHandle(ctx: GraphicsContext, x: CGFloat, height: CGFloat, isBlack: Bool) {
         let half = handleWidth / 2
         // Vertical tick line
         var line = Path()
@@ -106,7 +136,7 @@ struct LevelsView: View {
         line.addLine(to: CGPoint(x: x, y: height))
         ctx.stroke(line, with: .color(isBlack ? Color(white: 0.25) : Color(white: 0.9)), lineWidth: 1.5)
 
-        // Triangle at bottom pointing upward (◂▸ like a slider thumb)
+        // Triangle at bottom pointing upward
         let ty = height - 1
         var tri = Path()
         tri.move(to: CGPoint(x: x - half, y: ty))
@@ -143,17 +173,26 @@ struct LevelsView: View {
         guard width > 0 else { return }
 
         if dragging == nil {
-            // Pick which handle to drag based on start location proximity
-            let bpX = CGFloat(blackPoint) * width
-            let wpX = CGFloat(whitePoint) * width
+            let bpX    = CGFloat(blackPoint) * width
+            let wpX    = CGFloat(whitePoint) * width
             let startX = value.startLocation.x
-            let distBlack = abs(startX - bpX)
-            let distWhite = abs(startX - wpX)
-            if distBlack < hitSlop || distWhite < hitSlop {
-                dragging = distBlack <= distWhite ? .black : .white
-            } else {
-                return
+            let startY = value.startLocation.y
+
+            // Top zone: linked black-point handle (top ~35% of height)
+            if onLinkedBlackPointChanged != nil,
+               startY < viewHeight * 0.35,
+               abs(startX - bpX) < hitSlop {
+                dragging = .blackLinked
             }
+            // Bottom zone: regular black / white handles
+            else if startY > viewHeight * 0.5 {
+                let distBlack = abs(startX - bpX)
+                let distWhite = abs(startX - wpX)
+                if distBlack < hitSlop || distWhite < hitSlop {
+                    dragging = distBlack <= distWhite ? .black : .white
+                }
+            }
+            guard dragging != nil else { return }
         }
 
         let normalised = max(0, min(1, Double(value.location.x / width)))
@@ -163,6 +202,9 @@ struct LevelsView: View {
             blackPoint = min(normalised, whitePoint - minimumSpan)
         case .white:
             whitePoint = max(normalised, blackPoint + minimumSpan)
+        case .blackLinked:
+            let clamped = min(normalised, linkedBlackPointMax, whitePoint - minimumSpan)
+            onLinkedBlackPointChanged?(max(0, clamped))
         case nil:
             break
         }

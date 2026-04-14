@@ -1,18 +1,23 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var viewModel = ImageViewModel()
+    @StateObject private var viewModel        = ImageViewModel()
+    @StateObject private var presetStore      = PresetStore()
+    @StateObject private var recentFilesStore = RecentFilesStore()
 
     @State private var sidebarWidth: CGFloat = 320
 
-    private let minSidebarWidth: CGFloat = 260
-    private let minImageWidth:   CGFloat = 280
+    private let minSidebarWidth:    CGFloat = 260
+    private let minImageWidth:      CGFloat = 280
+    private let presetsColumnWidth: CGFloat = 128
+    private let recentFilesBarHeight: CGFloat = 96
 
     var body: some View {
+        VStack(spacing: 0) {
         GeometryReader { geo in
             let clampedSidebar = max(minSidebarWidth,
-                                    min(geo.size.width - minImageWidth, sidebarWidth))
-            let dividerX = geo.size.width - clampedSidebar  // left edge of divider in layout space
+                                    min(geo.size.width - minImageWidth - presetsColumnWidth, sidebarWidth))
+            let dividerX = geo.size.width - clampedSidebar - presetsColumnWidth
 
             HStack(spacing: 0) {
                 // Left: Image preview + crop overlay
@@ -46,6 +51,7 @@ struct ContentView: View {
 
                 // Divider — gesture uses named coordinate space so value.location.x
                 // is always in the stable HStack frame, not the divider's moving frame.
+                // dividerX = geo.width - clampedSidebar - presetsColumnWidth
                 ZStack {
                     Color(white: 0.18)
                     Color(white: 0.3).frame(width: 1)
@@ -58,9 +64,9 @@ struct ContentView: View {
                 .gesture(
                     DragGesture(minimumDistance: 1, coordinateSpace: .named("layout"))
                         .onChanged { value in
-                            let newWidth = geo.size.width - value.location.x
+                            let newWidth = geo.size.width - presetsColumnWidth - value.location.x
                             sidebarWidth = max(minSidebarWidth,
-                                               min(geo.size.width - minImageWidth, newWidth))
+                                               min(geo.size.width - minImageWidth - presetsColumnWidth, newWidth))
                         }
                 )
 
@@ -132,7 +138,9 @@ struct ContentView: View {
                         LevelsView(
                             blackPoint: $viewModel.inputBlackPoint,
                             whitePoint: $viewModel.inputWhitePoint,
-                            histogram: viewModel.histogram
+                            histogram: viewModel.histogram,
+                            onLinkedBlackPointChanged: { viewModel.setBlackPointWithCurves($0) },
+                            linkedBlackPointMax: viewModel.linkedBlackPointMax
                         )
                         .disabled(!hasImage)
 
@@ -149,7 +157,15 @@ struct ContentView: View {
                         Divider()
 
                         // ── 5. Curves ─────────────────────────────────────────
-                        ChannelPickerView(activeChannel: $viewModel.curves.activeChannel)
+                        HStack {
+                            ChannelPickerView(activeChannel: $viewModel.curves.activeChannel)
+                            Spacer()
+                            Button("Absorb BP") {
+                                viewModel.absorbCurveBlackPoint()
+                            }
+                            .font(.caption)
+                            .disabled(!hasImage || (viewModel.curves.activeCurve.sortedPoints.first?.x ?? 0) == 0)
+                        }
 
                         CurveEditorView(
                             curves: viewModel.curves,
@@ -178,9 +194,22 @@ struct ContentView: View {
                     .padding()
                 }
                 .frame(width: clampedSidebar)
+
+                // Right: presets column
+                PresetsView(store: presetStore, viewModel: viewModel)
+                    .frame(width: presetsColumnWidth)
+                    .background(Color(white: 0.14))
             }
             .coordinateSpace(name: "layout")
-        }
+        } // GeometryReader
+
+        Divider()
+
+        RecentFilesView(store: recentFilesStore, viewModel: viewModel)
+            .frame(height: recentFilesBarHeight)
+            .background(Color(white: 0.11))
+
+        } // VStack
         .navigationTitle(viewModel.fileName)
         .toolbar {
             ToolbarItemGroup {
@@ -217,6 +246,30 @@ struct ContentView: View {
                     Label("Reset Curves", systemImage: "arrow.counterclockwise")
                 }
                 .disabled(viewModel.originalImage == nil)
+            }
+        }
+        .onAppear {
+            // Save outgoing file's thumbnail before a new file loads.
+            viewModel.willLoadNewFile = { [weak viewModel, weak recentFilesStore] in
+                guard let vm = viewModel, let store = recentFilesStore,
+                      let url = vm.sourceURL,
+                      let entry = store.files.first(where: { $0.url == url }) else { return }
+                vm.renderSmallThumbnail { cg in
+                    guard let cg else { return }
+                    store.saveThumbnail(cg, for: entry.id)
+                }
+            }
+        }
+        .onChange(of: viewModel.sourceURL) { url in
+            guard let url else { return }
+            recentFilesStore.recordOpened(url)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            guard let url = viewModel.sourceURL,
+                  let entry = recentFilesStore.files.first(where: { $0.url == url }) else { return }
+            viewModel.renderSmallThumbnail { cg in
+                guard let cg else { return }
+                recentFilesStore.saveThumbnail(cg, for: entry.id)
             }
         }
     }

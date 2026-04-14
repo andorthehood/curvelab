@@ -1,6 +1,39 @@
 import Foundation
 import Combine
 
+// MARK: - Shared serialisable curve types
+
+struct CurvePoint: Codable {
+    var x, y: Double
+}
+
+struct CodableCurves: Codable {
+    var rgb, red, green, blue: [CurvePoint]
+}
+
+extension CodableCurves {
+    var rgbCurve:   ChannelCurve { ChannelCurve(points: rgb.map   { CurveControlPoint(x: $0.x, y: $0.y) }) }
+    var redCurve:   ChannelCurve { ChannelCurve(points: red.map   { CurveControlPoint(x: $0.x, y: $0.y) }) }
+    var greenCurve: ChannelCurve { ChannelCurve(points: green.map { CurveControlPoint(x: $0.x, y: $0.y) }) }
+    var blueCurve:  ChannelCurve { ChannelCurve(points: blue.map  { CurveControlPoint(x: $0.x, y: $0.y) }) }
+
+    func apply(to model: CurveModel) {
+        model.rgb   = rgbCurve
+        model.red   = redCurve
+        model.green = greenCurve
+        model.blue  = blueCurve
+    }
+
+    init(from model: CurveModel) {
+        rgb   = model.rgb.points.map   { CurvePoint(x: $0.x, y: $0.y) }
+        red   = model.red.points.map   { CurvePoint(x: $0.x, y: $0.y) }
+        green = model.green.points.map { CurvePoint(x: $0.x, y: $0.y) }
+        blue  = model.blue.points.map  { CurvePoint(x: $0.x, y: $0.y) }
+    }
+}
+
+// MARK: - Control point
+
 struct CurveControlPoint: Identifiable, Equatable {
     let id: UUID
     var x: Double
@@ -58,6 +91,19 @@ struct ChannelCurve: Equatable {
     mutating func shiftAllX(by delta: Double) {
         for i in points.indices {
             points[i].x = max(0, min(1, points[i].x + delta))
+        }
+    }
+
+    /// Remaps all control points for a black-point shift of `x0`.
+    /// `x_new = (x - x0) / (1 - x0)`
+    /// Positive x0: stretches points left (absorb / linked-drag rightward).
+    /// Negative x0: stretches points right (linked-drag leftward / undo).
+    mutating func stretchFromBlackPoint(_ x0: Double) {
+        guard x0 != 0 else { return }
+        let range = 1.0 - x0
+        guard abs(range) > 1e-10 else { return }
+        for i in points.indices {
+            points[i].x = max(0, min(1, (points[i].x - x0) / range))
         }
     }
 

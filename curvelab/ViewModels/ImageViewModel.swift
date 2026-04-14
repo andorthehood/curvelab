@@ -22,6 +22,14 @@ class ImageViewModel: ObservableObject {
     @Published var exportLinear = false
     @Published var inputBlackPoint: Double = 0.0
     @Published var inputWhitePoint: Double = 1.0
+    @Published var presetThumbnails: [UUID: CGImage] = [:]
+    @Published private(set) var cacheVersion: UUID = UUID()
+    @Published private(set) var sourceURL: URL? = nil
+    @Published private(set) var activeFileLiveThumbnail: CGImage? = nil
+
+    /// Called after the user selects a new file (panel or recent-files click) but
+    /// before `sourceURL` changes — ContentView uses this to save the outgoing thumbnail.
+    var willLoadNewFile: (() -> Void)? = nil
 
     var imageSize: CGSize {
         guard let ext = cachedImage?.extent else { return .zero }
@@ -32,7 +40,6 @@ class ImageViewModel: ObservableObject {
 
     private var cachedImage: CIImage?
     private var appliedCropRect: CGRect? = nil
-    private var sourceURL: URL? = nil
 
     // Suppresses the $isNegative → rebuildCache sink during import
     // so we don't rebuild twice when loading a sidecar.
@@ -84,7 +91,17 @@ class ImageViewModel: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        willLoadNewFile?()
+        loadFile(url: url)
+    }
 
+    /// Opens a file directly by URL — used by the recent files bar to skip the panel.
+    func openURL(_ url: URL) {
+        willLoadNewFile?()
+        loadFile(url: url)
+    }
+
+    private func loadFile(url: URL) {
         isLoading = true
         fileName = url.deletingPathExtension().lastPathComponent
         sourceURL = url
@@ -134,10 +151,25 @@ class ImageViewModel: ObservableObject {
                 if let state { state.apply(to: self.curves) } else { self.curves.reset() }
 
                 self.suppressCacheRebuild = false
+                self.cacheVersion = UUID()
                 self.updatePreview()
                 self.isLoading = false
                 self.saveState()
             }
+        }
+    }
+
+    /// Renders the current preview to a small CGImage (256px wide) for thumbnail storage.
+    func renderSmallThumbnail(completion: @escaping (CGImage?) -> Void) {
+        guard let preview = previewImage else { completion(nil); return }
+        let context = ciContext
+        let image   = preview
+        Task.detached {
+            let scale   = min(1.0, 256.0 / image.extent.width)
+            let scaled  = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            let cg      = context.createCGImage(scaled, from: scaled.extent, format: .RGBA8,
+                                                colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+            await MainActor.run { completion(cg) }
         }
     }
 
@@ -162,10 +194,19 @@ class ImageViewModel: ObservableObject {
         Task.detached {
             async let lvlHist = HistogramData.compute(from: levelsOnly, context: context)
             async let outHist = HistogramData.compute(from: preview, context: context)
+
+            // Small live thumbnail for the recent files bar (256px wide)
+            let thumbScale  = min(1.0, 256.0 / preview.extent.width)
+            let thumbScaled = preview.transformed(by: CGAffineTransform(scaleX: thumbScale, y: thumbScale))
+            let thumbCG     = context.createCGImage(thumbScaled, from: thumbScaled.extent,
+                                                    format: .RGBA8,
+                                                    colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+
             let (lv, out) = await (lvlHist, outHist)
             await MainActor.run {
-                self.levelsHistogram = lv
-                self.outputHistogram = out
+                self.levelsHistogram         = lv
+                self.outputHistogram         = out
+                self.activeFileLiveThumbnail = thumbCG
             }
         }
     }
@@ -211,6 +252,7 @@ class ImageViewModel: ObservableObject {
                 self.cropState   = cached.map {
                     hasCrop ? CropState(rect: $0.extent, isActive: true) : CropState.full(for: $0)
                 } ?? CropState(rect: .zero, isActive: false)
+                self.cacheVersion = UUID()
                 self.updatePreview()
                 self.isLoading = false
                 self.saveState()
@@ -235,6 +277,7 @@ class ImageViewModel: ObservableObject {
                 self.histogram   = histData
                 self.cropState   = cached.map { CropState(rect: $0.extent, isActive: true) }
                     ?? CropState(rect: .zero, isActive: false)
+                self.cacheVersion = UUID()
                 self.updatePreview()
                 self.isLoading = false
                 self.saveState()
@@ -255,6 +298,7 @@ class ImageViewModel: ObservableObject {
                 self.histogram   = histData
                 self.cropState   = cached.map { CropState.full(for: $0) }
                     ?? CropState(rect: .zero, isActive: false)
+                self.cacheVersion = UUID()
                 self.updatePreview()
                 self.isLoading = false
                 self.saveState()
@@ -264,11 +308,134 @@ class ImageViewModel: ObservableObject {
 
     // MARK: - Curves
 
+    /// Moves the input levels black point to `newBP` while adjusting curves so that
+    /// every pixel's output value is preserved. Equivalent to running absorbCurveBlackPoint
+    /// in real time as the linked handle is dragged.
+    func setBlackPointWithCurves(_ newBP: Double) {
+        let delta = newBP - inputBlackPoint
+        guard delta != 0 else { return }
+        let range = inputWhitePoint - inputBlackPoint
+        guard range > 1e-10 else { return }
+        let x0 = delta / range   // normalised increment in post-levels space
+        stretchCurves(by: x0)
+        inputBlackPoint = newBP
+    }
+
+    /// Absorbs the active channel's black-point shift into the input levels black point,
+    /// then stretches the appropriate curves back to fill [0, 1]. Output is mathematically unchanged.
+    func absorbCurveBlackPoint() {
+        let x0 = curves.activeCurve.sortedPoints.first?.x ?? 0
+        guard x0 > 0 else { return }
+
+        let range = inputWhitePoint - inputBlackPoint
+        inputBlackPoint += x0 * range
+        stretchCurves(by: x0)
+    }
+
+    /// Maximum value the linked black-point handle may reach — the point at which the
+    /// relevant curve's leftmost control point would land exactly at x = 0 after stretching.
+    /// Dragging beyond this would clamp the leftmost point to 0 and destroy the curve shape.
+    var linkedBlackPointMax: Double {
+        let leftmostX: Double
+        switch curves.activeChannel {
+        case .rgb:
+            leftmostX = curves.rgb.sortedPoints.first?.x ?? 0
+        case .red, .green, .blue:
+            leftmostX = [curves.red, curves.green, curves.blue]
+                .compactMap { $0.sortedPoints.first?.x }
+                .min() ?? 0
+        }
+        guard leftmostX > 0 else { return inputBlackPoint }
+        return inputBlackPoint + leftmostX * (inputWhitePoint - inputBlackPoint)
+    }
+
+    /// Stretches either the RGB curve or the per-channel curves based on the active channel.
+    /// Stretching both would double-apply the correction and darken the image.
+    ///
+    /// - RGB active → adjust only the RGB curve.
+    /// - R / G / B active → adjust all three per-channel curves.
+    private func stretchCurves(by x0: Double) {
+        switch curves.activeChannel {
+        case .rgb:
+            curves.rgb.stretchFromBlackPoint(x0)
+        case .red, .green, .blue:
+            curves.red.stretchFromBlackPoint(x0)
+            curves.green.stretchFromBlackPoint(x0)
+            curves.blue.stretchFromBlackPoint(x0)
+        }
+    }
+
     func resetCurves() {
         curves.reset()
         inputBlackPoint = 0.0
         inputWhitePoint = 1.0
         updatePreview()
+    }
+
+    // MARK: - Presets
+
+    func capturePreset() -> Preset {
+        Preset(
+            id: UUID(),
+            isNegative: isNegative,
+            inputBlackPoint: inputBlackPoint,
+            inputWhitePoint: inputWhitePoint,
+            curves: CodableCurves(from: curves)
+        )
+    }
+
+    func applyPreset(_ preset: Preset) {
+        isNegative      = preset.isNegative
+        inputBlackPoint = preset.inputBlackPoint
+        inputWhitePoint = preset.inputWhitePoint
+        preset.curves.apply(to: curves)
+    }
+
+    /// Renders a small thumbnail for each preset against the current cached image.
+    /// Thumbnails are stored in `presetThumbnails` keyed by preset id.
+    func renderThumbnails(for presets: [Preset]) {
+        guard let cachedImage else { return }
+        let context          = ciContext
+        let image            = cachedImage
+        let currentNegative  = isNegative
+        let targetWidth: CGFloat = 256   // 2× for Retina @2x
+
+        Task.detached {
+            let extent = image.extent
+            let scale  = min(1.0, targetWidth / extent.width)
+            var scaledImage = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            // Normalise origin to (0,0) after scaling
+            scaledImage = scaledImage.transformed(by: CGAffineTransform(
+                translationX: -scaledImage.extent.minX,
+                y: -scaledImage.extent.minY
+            ))
+
+            var results: [UUID: CGImage] = [:]
+            for preset in presets {
+                var source = scaledImage
+                // If this preset inverts differently from the current cache, compensate.
+                if preset.isNegative != currentNegative {
+                    source = source.applyingFilter("CIColorInvert")
+                }
+                let c = preset.curves
+                let filtered = LUTGenerator.applyFilter(
+                    to: source,
+                    rgb: c.rgbCurve, red: c.redCurve,
+                    green: c.greenCurve, blue: c.blueCurve,
+                    blackPoint: preset.inputBlackPoint,
+                    whitePoint: preset.inputWhitePoint
+                )
+                if let cg = context.createCGImage(
+                    filtered,
+                    from: filtered.extent,
+                    format: .RGBA8,
+                    colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!
+                ) {
+                    results[preset.id] = cg
+                }
+            }
+            await MainActor.run { self.presetThumbnails = results }
+        }
     }
 
     // MARK: - Export
