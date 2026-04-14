@@ -47,11 +47,23 @@ struct ContentView: View {
                     )
                     .disabled(viewModel.originalImage == nil)
 
+                    if let levelsHistogram = viewModel.levelsHistogram {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("After Levels")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            ResultHistogramView(
+                                histogram: levelsHistogram,
+                                activeChannel: .rgb
+                            )
+                        }
+                    }
+
                     CurveEditorView(
                         curves: viewModel.curves,
-                        histogram: viewModel.histogram,
-                        blackPoint: viewModel.inputBlackPoint,
-                        whitePoint: viewModel.inputWhitePoint
+                        histogram: viewModel.levelsHistogram ?? viewModel.histogram,
+                        blackPoint: 0,
+                        whitePoint: 1
                     )
                     .frame(maxWidth: .infinity)
 

@@ -12,6 +12,7 @@ class ImageViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var fileName = "CurveLab"
     @Published var histogram: HistogramData?
+    @Published var levelsHistogram: HistogramData?
     @Published var outputHistogram: HistogramData?
     @Published var rotationAngle: Double = 0
     @Published var cropState: CropState = CropState(rect: .zero, isActive: false)
@@ -143,16 +144,27 @@ class ImageViewModel: ObservableObject {
     func updatePreview() {
         guard let cachedImage else {
             previewImage = nil
+            levelsHistogram = nil
             outputHistogram = nil
             return
         }
         let preview = LUTGenerator.applyFilter(to: cachedImage, curves: curves,
                                                blackPoint: inputBlackPoint, whitePoint: inputWhitePoint)
         previewImage = preview
+
+        // Post-levels, pre-curves: apply only the levels remap with identity curves
+        let levelsOnly = LUTGenerator.applyFilter(to: cachedImage, curves: CurveModel(),
+                                                  blackPoint: inputBlackPoint, whitePoint: inputWhitePoint)
+
         let context = ciContext
         Task.detached {
-            let histData = HistogramData.compute(from: preview, context: context)
-            await MainActor.run { self.outputHistogram = histData }
+            async let lvlHist = HistogramData.compute(from: levelsOnly, context: context)
+            async let outHist = HistogramData.compute(from: preview, context: context)
+            let (lv, out) = await (lvlHist, outHist)
+            await MainActor.run {
+                self.levelsHistogram = lv
+                self.outputHistogram = out
+            }
         }
     }
 
