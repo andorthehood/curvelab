@@ -46,6 +46,29 @@ class ImageViewModel: ObservableObject {
     private var suppressCacheRebuild = false
 
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+
+    // MARK: - Pixel-buffer cache
+
+    /// Caches fully-rendered float32 CVPixelBuffer CIImages.
+    /// Key encodes URL path + rotation + inversion + crop so different render
+    /// configurations of the same file get independent entries.
+    /// Capacity 3 — each entry can be 300–600 MB for a full-resolution scan.
+    private let bufferCache = LRUCache<String, CIImage>(capacity: 3)
+
+    /// Caches the lazy CIRAWFilter CIImages returned by DNGLoader.
+    /// These hold no decoded pixel data until rendered, so storing several is cheap.
+    /// They are needed so rotate / crop operations work after a buffer-cache hit.
+    private let originalCache = LRUCache<String, CIImage>(capacity: 6)
+
+    /// Builds the cache key for the rendered float32 buffer.
+    /// Levels and curves are NOT included — they only affect the LUT, not the buffer.
+    private func bufferCacheKey(url: URL, rotation: Double,
+                                isNegative: Bool, cropRect: CGRect?) -> String {
+        let crop = cropRect.map {
+            "\($0.origin.x),\($0.origin.y),\($0.width),\($0.height)"
+        } ?? "none"
+        return "\(url.path)|\(rotation)|\(isNegative)|\(crop)"
+    }
     private var cancellables = Set<AnyCancellable>()
 
     init() {
@@ -120,6 +143,45 @@ class ImageViewModel: ObservableObject {
 
         suppressCacheRebuild = true
 
+        let bufKey  = bufferCacheKey(url: url, rotation: rotation,
+                                     isNegative: invertNeg, cropRect: cropRect)
+        let origKey = url.path
+
+        // ── Fast path: buffer already in cache ─────────────────────────────
+        if let cachedBuf = bufferCache.get(bufKey) {
+            let cachedOrig = originalCache.get(origKey)  // may be nil; recovered below
+            Task.detached {
+                // Histogram still computed off main thread
+                let histData = HistogramData.compute(from: cachedBuf, context: context)
+                // If the lazy original isn't cached, re-decode it (cheap — no pixel render)
+                let original = cachedOrig ?? DNGLoader.load(url: url)
+                await MainActor.run {
+                    if let original { self.originalCache.set(origKey, original) }
+                    self.originalImage   = original
+                    self.cachedImage     = cachedBuf
+                    self.rotationAngle   = rotation
+                    self.isNegative      = invertNeg
+                    self.appliedCropRect = cropRect
+                    self.histogram       = histData
+                    self.cropState       = cropRect != nil
+                        ? CropState(rect: cachedBuf.extent, isActive: true)
+                        : CropState.full(for: cachedBuf)
+                    self.showCropOverlay = false
+                    self.cropAspectRatio = nil
+                    self.inputBlackPoint = blackPoint
+                    self.inputWhitePoint = whitePoint
+                    if let state { state.apply(to: self.curves) } else { self.curves.reset() }
+                    self.suppressCacheRebuild = false
+                    self.cacheVersion = UUID()
+                    self.updatePreview()
+                    self.isLoading = false
+                    self.saveState()
+                }
+            }
+            return
+        }
+
+        // ── Slow path: full DNG decode + render ─────────────────────────────
         Task.detached {
             guard let decoded = DNGLoader.load(url: url) else {
                 await MainActor.run { self.isLoading = false; self.suppressCacheRebuild = false }
@@ -132,6 +194,10 @@ class ImageViewModel: ObservableObject {
             let histData = cached.flatMap { HistogramData.compute(from: $0, context: context) }
 
             await MainActor.run {
+                // Store in caches for future visits
+                if let cached { self.bufferCache.set(bufKey, cached) }
+                self.originalCache.set(origKey, decoded)
+
                 self.originalImage   = decoded
                 self.cachedImage     = cached
                 self.rotationAngle   = rotation
@@ -239,14 +305,39 @@ class ImageViewModel: ObservableObject {
         guard let base = preparedBase(invert: invert) else { return }
         isLoading = true
 
+        let effectiveInvert = invert ?? isNegative
         let imageToCache = Self.applyCrop(appliedCropRect, to: base)
-        let hasCrop = appliedCropRect != nil
-        let context = ciContext
+        let hasCrop  = appliedCropRect != nil
+        let context  = ciContext
+        let bufKey   = sourceURL.map {
+            bufferCacheKey(url: $0, rotation: rotationAngle,
+                           isNegative: effectiveInvert, cropRect: appliedCropRect)
+        }
+
+        // Fast path: this exact configuration is already cached
+        if let key = bufKey, let cached = bufferCache.get(key) {
+            Task.detached {
+                let histData = HistogramData.compute(from: cached, context: context)
+                await MainActor.run {
+                    self.cachedImage = cached
+                    self.histogram   = histData
+                    self.cropState   = hasCrop
+                        ? CropState(rect: cached.extent, isActive: true)
+                        : CropState.full(for: cached)
+                    self.cacheVersion = UUID()
+                    self.updatePreview()
+                    self.isLoading = false
+                    self.saveState()
+                }
+            }
+            return
+        }
 
         Task.detached {
             let cached   = Self.renderToBuffer(imageToCache, context: context)
             let histData = cached.flatMap { HistogramData.compute(from: $0, context: context) }
             await MainActor.run {
+                if let bufKey, let cached { self.bufferCache.set(bufKey, cached) }
                 self.cachedImage = cached
                 self.histogram   = histData
                 self.cropState   = cached.map {
@@ -269,10 +360,15 @@ class ImageViewModel: ObservableObject {
         appliedCropRect  = clampedState.rect
         isLoading = true
         let context = ciContext
+        let bufKey  = sourceURL.map {
+            bufferCacheKey(url: $0, rotation: rotationAngle,
+                           isNegative: isNegative, cropRect: appliedCropRect)
+        }
         Task.detached {
             let cached   = Self.renderToBuffer(imageToCache, context: context)
             let histData = cached.flatMap { HistogramData.compute(from: $0, context: context) }
             await MainActor.run {
+                if let bufKey, let cached { self.bufferCache.set(bufKey, cached) }
                 self.cachedImage = cached
                 self.histogram   = histData
                 self.cropState   = cached.map { CropState(rect: $0.extent, isActive: true) }
@@ -290,10 +386,33 @@ class ImageViewModel: ObservableObject {
         appliedCropRect = nil
         isLoading = true
         let context = ciContext
+        let bufKey  = sourceURL.map {
+            bufferCacheKey(url: $0, rotation: rotationAngle,
+                           isNegative: isNegative, cropRect: nil)
+        }
+
+        // Uncropped view may already be cached (e.g. user just applied crop and now resets)
+        if let key = bufKey, let cached = bufferCache.get(key) {
+            Task.detached {
+                let histData = HistogramData.compute(from: cached, context: context)
+                await MainActor.run {
+                    self.cachedImage = cached
+                    self.histogram   = histData
+                    self.cropState   = CropState.full(for: cached)
+                    self.cacheVersion = UUID()
+                    self.updatePreview()
+                    self.isLoading = false
+                    self.saveState()
+                }
+            }
+            return
+        }
+
         Task.detached {
             let cached   = Self.renderToBuffer(base, context: context)
             let histData = cached.flatMap { HistogramData.compute(from: $0, context: context) }
             await MainActor.run {
+                if let bufKey, let cached { self.bufferCache.set(bufKey, cached) }
                 self.cachedImage = cached
                 self.histogram   = histData
                 self.cropState   = cached.map { CropState.full(for: $0) }
