@@ -13,7 +13,7 @@ A macOS app for editing tone curves on 48-bit DNG files from film scanners, with
 - **Input histogram** displayed behind the curve, aligned to the input axis so you can place points based on where the image data sits
 - **Output histogram** showing the result after curves are applied, updated live as you drag
 - **Real-time GPU preview** via Metal and `CIColorCube` 3D LUT — no CPU roundtrips
-- **Float32 pixel cache** — DNG is decoded once into a `CVPixelBuffer` (128-bit RGBA float); all curve adjustments apply to the cache with no re-decode
+- **Float32 processing throughout** — DNG is decoded into a `CVPixelBuffer` (128-bit RGBA float) and all curve calculations, LUT application, and rendering operate at full 32-bit float precision; no precision loss until final 8-bit JPG export
 - **HDR preview** toggle — switches the Metal layer to `rgba16Float` with `extendedLinearSRGB` for displays that support EDR
 - **Rotate** the image 90° left or right (rotation rebuilds the cache, curves remain live)
 - **Export to JPG** at full resolution in sRGB, quality 0.92
