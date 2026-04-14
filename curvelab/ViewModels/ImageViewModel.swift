@@ -11,6 +11,7 @@ class ImageViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var fileName = "CurveLab"
     @Published var histogram: HistogramData?
+    @Published var rotationAngle: Double = 0 // degrees: 0, 90, 180, 270
 
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
     private var cancellables = Set<AnyCancellable>()
@@ -54,7 +55,31 @@ class ImageViewModel: ObservableObject {
             previewImage = nil
             return
         }
-        previewImage = LUTGenerator.applyFilter(to: originalImage, curves: curves)
+        let curved = LUTGenerator.applyFilter(to: originalImage, curves: curves)
+        previewImage = rotateImage(curved)
+    }
+
+    func rotateLeft() {
+        rotationAngle = (rotationAngle - 90).truncatingRemainder(dividingBy: 360)
+        if rotationAngle < 0 { rotationAngle += 360 }
+        updatePreview()
+    }
+
+    func rotateRight() {
+        rotationAngle = (rotationAngle + 90).truncatingRemainder(dividingBy: 360)
+        updatePreview()
+    }
+
+    private func rotateImage(_ image: CIImage) -> CIImage {
+        guard rotationAngle != 0 else { return image }
+        let radians = rotationAngle * .pi / 180
+        let extent = image.extent
+        let cx = extent.midX
+        let cy = extent.midY
+        return image
+            .transformed(by: CGAffineTransform(translationX: -cx, y: -cy))
+            .transformed(by: CGAffineTransform(rotationAngle: CGFloat(radians)))
+            .transformed(by: CGAffineTransform(translationX: cx, y: cy))
     }
 
     func exportJPG() {

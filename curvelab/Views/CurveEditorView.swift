@@ -25,7 +25,10 @@ struct CurveEditorView: View {
                     drawActiveCurve(context: context, rect: rect)
                     drawHandles(context: context, rect: rect)
                 }
-                .gesture(
+                .onTapGesture(count: 2) { location in
+                    onDoubleClick(location: location, size: size, origin: origin)
+                }
+                .simultaneousGesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
                             onDrag(value: value, size: size, origin: origin)
@@ -34,16 +37,6 @@ struct CurveEditorView: View {
                             draggingPointID = nil
                         }
                 )
-                .onTapGesture(count: 2) { location in
-                    onDoubleClick(location: location, size: size, origin: origin)
-                }
-                .contextMenu {
-                    if let draggingPointID {
-                        Button("Delete Point") {
-                            curves.activeCurve.removePoint(id: draggingPointID)
-                        }
-                    }
-                }
             }
         }
         .aspectRatio(1, contentMode: .fit)
@@ -106,13 +99,13 @@ struct CurveEditorView: View {
         }
 
         let binCount = bins.count
-        let barWidth = rect.width / CGFloat(binCount)
 
         var path = Path()
         path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
 
         for i in 0..<binCount {
-            let x = rect.minX + CGFloat(i) * barWidth
+            let t = CGFloat(i) / CGFloat(binCount - 1)
+            let x = rect.minX + t * rect.width
             let h = CGFloat(bins[i]) * rect.height
             path.addLine(to: CGPoint(x: x, y: rect.maxY - h))
         }
@@ -204,7 +197,7 @@ struct CurveEditorView: View {
         let norm = screenToNormalized(value.location, size: size, origin: origin)
 
         if draggingPointID == nil {
-            // Find nearest point within hit radius
+            // Find nearest existing point within hit radius
             let curve = curves.activeCurve
             var bestID: UUID?
             var bestDist: CGFloat = .infinity
@@ -217,7 +210,21 @@ struct CurveEditorView: View {
                     bestID = point.id
                 }
             }
-            draggingPointID = bestID
+
+            if let id = bestID {
+                draggingPointID = id
+            } else {
+                // No existing point nearby — add a new one on the curve and start dragging it
+                let startNorm = screenToNormalized(value.startLocation, size: size, origin: origin)
+                if startNorm.x > 0.01 && startNorm.x < 0.99 {
+                    curves.activeCurve.addPoint(at: startNorm.x)
+                    // Find the newly added point (closest to startNorm.x)
+                    let sorted = curves.activeCurve.sortedPoints
+                    if let newPoint = sorted.min(by: { abs($0.x - startNorm.x) < abs($1.x - startNorm.x) }) {
+                        draggingPointID = newPoint.id
+                    }
+                }
+            }
         }
 
         if let id = draggingPointID {
@@ -226,11 +233,29 @@ struct CurveEditorView: View {
     }
 
     private func onDoubleClick(location: CGPoint, size: CGFloat, origin: CGPoint) {
-        let norm = screenToNormalized(location, size: size, origin: origin)
-        // Don't add too close to endpoints
-        if norm.x > 0.02 && norm.x < 0.98 {
-            curves.activeCurve.addPoint(at: norm.x)
+        let rect = CGRect(origin: origin, size: CGSize(width: size, height: size))
+        if let id = nearestPoint(to: location, in: rect) {
+            curves.activeCurve.removePoint(id: id)
+        } else {
+            let norm = screenToNormalized(location, size: size, origin: origin)
+            if norm.x > 0.02 && norm.x < 0.98 {
+                curves.activeCurve.addPoint(at: norm.x)
+            }
         }
+    }
+
+    private func nearestPoint(to location: CGPoint, in rect: CGRect) -> UUID? {
+        var bestID: UUID?
+        var bestDist: CGFloat = hitRadius
+        for point in curves.activeCurve.sortedPoints {
+            let screenPos = pointToScreen(point, in: rect)
+            let dist = hypot(location.x - screenPos.x, location.y - screenPos.y)
+            if dist < bestDist {
+                bestDist = dist
+                bestID = point.id
+            }
+        }
+        return bestID
     }
 
     // MARK: - Colors
@@ -244,3 +269,4 @@ struct CurveEditorView: View {
         }
     }
 }
+

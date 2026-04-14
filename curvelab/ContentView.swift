@@ -32,6 +32,18 @@ struct ContentView: View {
                 CurveEditorView(curves: viewModel.curves, histogram: viewModel.histogram)
                     .frame(maxWidth: .infinity)
 
+                if let histogram = viewModel.histogram {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Output")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ResultHistogramView(
+                            histogram: histogram.remapped(through: viewModel.curves),
+                            activeChannel: viewModel.curves.activeChannel
+                        )
+                    }
+                }
+
                 Spacer()
             }
             .padding()
@@ -52,6 +64,20 @@ struct ContentView: View {
                     Label("Export JPG", systemImage: "square.and.arrow.up")
                 }
                 .disabled(viewModel.previewImage == nil)
+
+                Button {
+                    viewModel.rotateLeft()
+                } label: {
+                    Label("Rotate Left", systemImage: "rotate.left")
+                }
+                .disabled(viewModel.originalImage == nil)
+
+                Button {
+                    viewModel.rotateRight()
+                } label: {
+                    Label("Rotate Right", systemImage: "rotate.right")
+                }
+                .disabled(viewModel.originalImage == nil)
 
                 Button {
                     viewModel.resetCurves()
