@@ -58,6 +58,10 @@ struct ContentView: View {
                     Toggle("HDR Preview", isOn: $viewModel.hdrPreview)
                         .toggleStyle(.checkbox)
 
+                    Toggle("Negative", isOn: $viewModel.isNegative)
+                        .toggleStyle(.checkbox)
+                        .disabled(viewModel.originalImage == nil)
+
                     Toggle("Show Crop", isOn: $viewModel.showCropOverlay)
                         .toggleStyle(.checkbox)
                         .disabled(viewModel.originalImage == nil)

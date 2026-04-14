@@ -16,6 +16,7 @@ class ImageViewModel: ObservableObject {
     @Published var hdrPreview = false
     @Published var cropState: CropState = CropState(rect: .zero, isActive: false)
     @Published var showCropOverlay = false
+    @Published var isNegative = false
 
     var imageSize: CGSize {
         guard let ext = cachedImage?.extent else { return .zero }
@@ -38,6 +39,11 @@ class ImageViewModel: ObservableObject {
                 self?.updatePreview()
             }
             .store(in: &cancellables)
+
+        $isNegative
+            .dropFirst()
+            .sink { [weak self] invert in self?.rebuildCache(invert: invert) }
+            .store(in: &cancellables)
     }
 
     func importImage() {
@@ -52,13 +58,15 @@ class ImageViewModel: ObservableObject {
         fileName = url.deletingPathExtension().lastPathComponent
 
         let context = ciContext
+        let invertNegative = isNegative
         Task.detached {
             guard let decoded = DNGLoader.load(url: url) else {
                 await MainActor.run { self.isLoading = false }
                 return
             }
-            // Render decoded DNG into a float32 pixel buffer once
-            let cached = Self.renderToBuffer(decoded, context: context)
+            // Render decoded DNG into a float32 pixel buffer once, applying inversion for negatives
+            let prepared = invertNegative ? decoded.applyingFilter("CIColorInvert") : decoded
+            let cached = Self.renderToBuffer(prepared, context: context)
             let histData = cached.flatMap { HistogramData.compute(from: $0) }
             await MainActor.run {
                 self.originalImage = decoded
@@ -94,15 +102,19 @@ class ImageViewModel: ObservableObject {
         rebuildCache()
     }
 
-    private func rebuildCache() {
+    private func rebuildCache(invert: Bool? = nil) {
         guard let originalImage else { return }
         isLoading = true
         let rotated = rotateImage(originalImage)
+        let shouldInvert = invert ?? isNegative
+        let prepared = shouldInvert ? rotated.applyingFilter("CIColorInvert") : rotated
         let context = ciContext
         Task.detached {
-            let cached = Self.renderToBuffer(rotated, context: context)
+            let cached = Self.renderToBuffer(prepared, context: context)
+            let histData = cached.flatMap { HistogramData.compute(from: $0) }
             await MainActor.run {
                 self.cachedImage = cached
+                self.histogram = histData
                 self.cropState = cached.map { CropState.full(for: $0) }
                     ?? CropState(rect: .zero, isActive: false)
                 self.updatePreview()
