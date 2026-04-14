@@ -7,6 +7,8 @@ struct EditingState: Codable {
     var rotation: Double
     var isNegative: Bool
     var appliedCropRect: CodableRect?
+    var inputBlackPoint: Double
+    var inputWhitePoint: Double
     var curves: CodableCurves
 
     // MARK: - Nested types
@@ -30,12 +32,34 @@ struct EditingState: Codable {
         var x, y: Double
     }
 
+    // MARK: - Codable with backward-compatible defaults for new fields
+
+    enum CodingKeys: String, CodingKey {
+        case version, rotation, isNegative, appliedCropRect
+        case inputBlackPoint, inputWhitePoint
+        case curves
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version          = try c.decodeIfPresent(Int.self,        forKey: .version)          ?? 1
+        rotation         = try c.decode(Double.self,              forKey: .rotation)
+        isNegative       = try c.decode(Bool.self,                forKey: .isNegative)
+        appliedCropRect  = try c.decodeIfPresent(CodableRect.self, forKey: .appliedCropRect)
+        inputBlackPoint  = try c.decodeIfPresent(Double.self,     forKey: .inputBlackPoint)  ?? 0.0
+        inputWhitePoint  = try c.decodeIfPresent(Double.self,     forKey: .inputWhitePoint)  ?? 1.0
+        curves           = try c.decode(CodableCurves.self,       forKey: .curves)
+    }
+
     // MARK: - Convenience init from live model
 
-    init(rotation: Double, isNegative: Bool, appliedCropRect: CGRect?, curves: CurveModel) {
+    init(rotation: Double, isNegative: Bool, appliedCropRect: CGRect?,
+         inputBlackPoint: Double, inputWhitePoint: Double, curves: CurveModel) {
         self.rotation = rotation
         self.isNegative = isNegative
         self.appliedCropRect = appliedCropRect.map { CodableRect($0) }
+        self.inputBlackPoint = inputBlackPoint
+        self.inputWhitePoint = inputWhitePoint
         self.curves = CodableCurves(
             rgb:   curves.rgb.points.map   { Point(x: $0.x, y: $0.y) },
             red:   curves.red.points.map   { Point(x: $0.x, y: $0.y) },

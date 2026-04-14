@@ -3,7 +3,9 @@ import CoreImage
 enum LUTGenerator {
     static let cubeSize = 33
 
-    static func buildCubeData(curves: CurveModel) -> Data {
+    static func buildCubeData(curves: CurveModel,
+                              blackPoint: Double = 0,
+                              whitePoint: Double = 1) -> Data {
         let size = cubeSize
         let rgbSpline = curves.rgb.spline()
         let redSpline = curves.red.spline()
@@ -12,6 +14,8 @@ enum LUTGenerator {
 
         let count = size * size * size * 4
         var floats = [Float](repeating: 0, count: count)
+
+        let range = whitePoint - blackPoint
 
         var idx = 0
         // CIColorCube order: blue outermost, green middle, red innermost
@@ -22,10 +26,15 @@ enum LUTGenerator {
                 for rIdx in 0..<size {
                     let rNorm = Double(rIdx) / Double(size - 1)
 
+                    // Input levels remap: t' = clamp((t - lo) / (hi - lo), 0, 1)
+                    let rLeveled = range > 0 ? max(0, min(1, (rNorm - blackPoint) / range)) : 0
+                    let gLeveled = range > 0 ? max(0, min(1, (gNorm - blackPoint) / range)) : 0
+                    let bLeveled = range > 0 ? max(0, min(1, (bNorm - blackPoint) / range)) : 0
+
                     // Apply composite RGB curve first
-                    let rAfterRGB = rgbSpline.evaluate(at: rNorm)
-                    let gAfterRGB = rgbSpline.evaluate(at: gNorm)
-                    let bAfterRGB = rgbSpline.evaluate(at: bNorm)
+                    let rAfterRGB = rgbSpline.evaluate(at: rLeveled)
+                    let gAfterRGB = rgbSpline.evaluate(at: gLeveled)
+                    let bAfterRGB = rgbSpline.evaluate(at: bLeveled)
 
                     // Then apply per-channel curves
                     floats[idx]     = Float(redSpline.evaluate(at: rAfterRGB))
@@ -41,8 +50,9 @@ enum LUTGenerator {
         return floats.withUnsafeBufferPointer { Data(buffer: $0) }
     }
 
-    static func applyFilter(to image: CIImage, curves: CurveModel) -> CIImage {
-        let cubeData = buildCubeData(curves: curves)
+    static func applyFilter(to image: CIImage, curves: CurveModel,
+                            blackPoint: Double = 0, whitePoint: Double = 1) -> CIImage {
+        let cubeData = buildCubeData(curves: curves, blackPoint: blackPoint, whitePoint: whitePoint)
 
         guard let filter = CIFilter(name: "CIColorCube") else { return image }
         filter.setValue(image, forKey: kCIInputImageKey)

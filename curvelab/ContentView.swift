@@ -40,8 +40,20 @@ struct ContentView: View {
                 VStack(spacing: 16) {
                     ChannelPickerView(activeChannel: $viewModel.curves.activeChannel)
 
-                    CurveEditorView(curves: viewModel.curves, histogram: viewModel.histogram)
-                        .frame(maxWidth: .infinity)
+                    LevelsView(
+                        blackPoint: $viewModel.inputBlackPoint,
+                        whitePoint: $viewModel.inputWhitePoint,
+                        histogram: viewModel.histogram
+                    )
+                    .disabled(viewModel.originalImage == nil)
+
+                    CurveEditorView(
+                        curves: viewModel.curves,
+                        histogram: viewModel.histogram,
+                        blackPoint: viewModel.inputBlackPoint,
+                        whitePoint: viewModel.inputWhitePoint
+                    )
+                    .frame(maxWidth: .infinity)
 
                     if let outputHistogram = viewModel.outputHistogram {
                         VStack(alignment: .leading, spacing: 4) {

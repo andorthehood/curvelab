@@ -32,11 +32,10 @@ Original DNG file (on disk)
        │   ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ real-time from here down ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
        │
        ▼
-  Input Levels remap              (inputBlackPoint, inputWhitePoint) → [0, 1]
-       │                          t' = clamp((t - lo) / (hi - lo), 0, 1)
-       │
-       ▼
   CIColorCube 3D LUT              33³ entries, built from levels + curves on CPU, applied on GPU
+       │                          step 1 — input levels remap:
+       │                            t' = clamp((t - blackPoint) / (whitePoint - blackPoint), 0, 1)
+       │                          step 2 — RGB composite curve → per-channel R / G / B curves
        │                          order: RGB composite curve → per-channel R / G / B curves
        │
        ▼
@@ -64,7 +63,8 @@ Original DNG file (on disk)
 
 | Action | Rebuilds LUT |
 |--------|-------------|
-| Drag input levels handle | ✓ |
+| Drag black-point handle | ✓ |
+| Drag white-point handle | ✓ |
 | Drag curve point | ✓ |
 | Switch active channel | ✓ |
 

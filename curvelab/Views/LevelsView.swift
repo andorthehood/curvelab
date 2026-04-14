@@ -1,0 +1,170 @@
+import SwiftUI
+
+/// Compact input-levels control: a histogram with two draggable handles for
+/// black point (left) and white point (right).  The handles operate in the
+/// 0…1 normalised domain matching the float32 cache values.
+struct LevelsView: View {
+    @Binding var blackPoint: Double
+    @Binding var whitePoint: Double
+    var histogram: HistogramData?
+
+    /// Minimum gap between handles (in normalised units)
+    private let minimumSpan: Double = 0.01
+    private let handleWidth: CGFloat = 10
+    private let viewHeight: CGFloat = 50
+    private let hitSlop: CGFloat = 18
+
+    // Which handle is being dragged?
+    @State private var dragging: Handle? = nil
+
+    private enum Handle { case black, white }
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            ZStack(alignment: .topLeading) {
+                // Histogram canvas
+                Canvas { ctx, size in
+                    drawHistogram(ctx: ctx, size: size)
+                    drawHandles(ctx: ctx, size: size)
+                }
+                .frame(height: viewHeight)
+
+                // Single transparent drag layer
+                Color.clear
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in onDrag(value: value, width: w) }
+                            .onEnded   { _ in dragging = nil }
+                    )
+            }
+        }
+        .frame(height: viewHeight)
+    }
+
+    // MARK: - Drawing
+
+    private func drawHistogram(ctx: GraphicsContext, size: CGSize) {
+        let rect = CGRect(origin: .zero, size: size)
+        // Background
+        ctx.fill(Path(rect), with: .color(Color(white: 0.15)))
+
+        guard let histogram else {
+            ctx.stroke(Path(rect), with: .color(Color(white: 0.3)), lineWidth: 1)
+            return
+        }
+
+        // Draw all three channels faintly + luminance outline
+        let channels: [([Float], Color)] = [
+            (histogram.red,   .red),
+            (histogram.green, .green),
+            (histogram.blue,  Color(red: 0.3, green: 0.5, blue: 1.0))
+        ]
+        for (bins, color) in channels {
+            let path = histogramPath(bins: bins, in: rect)
+            ctx.fill(path, with: .color(color.opacity(0.2)))
+        }
+        let lumPath = histogramPath(bins: histogram.luminance, in: rect)
+        ctx.stroke(lumPath, with: .color(Color(white: 0.5)), lineWidth: 1)
+
+        // Shade the clipped regions (outside the [blackPoint, whitePoint] range)
+        let bpX = CGFloat(blackPoint) * rect.width
+        let wpX = CGFloat(whitePoint) * rect.width
+        let shadingColor = Color.black.opacity(0.45)
+
+        if bpX > 0 {
+            let leftRect = CGRect(x: rect.minX, y: rect.minY, width: bpX, height: rect.height)
+            ctx.fill(Path(leftRect), with: .color(shadingColor))
+        }
+        if wpX < rect.width {
+            let rightRect = CGRect(x: wpX, y: rect.minY,
+                                   width: rect.width - wpX, height: rect.height)
+            ctx.fill(Path(rightRect), with: .color(shadingColor))
+        }
+
+        // Border
+        ctx.stroke(Path(rect), with: .color(Color(white: 0.3)), lineWidth: 1)
+    }
+
+    private func drawHandles(ctx: GraphicsContext, size: CGSize) {
+        let h = size.height
+        let bpX = CGFloat(blackPoint) * size.width
+        let wpX = CGFloat(whitePoint) * size.width
+
+        // Black-point handle (downward triangle at bottom, dark fill)
+        drawHandle(ctx: ctx, x: bpX, height: h, isBlack: true)
+        // White-point handle (downward triangle at bottom, light fill)
+        drawHandle(ctx: ctx, x: wpX, height: h, isBlack: false)
+    }
+
+    private func drawHandle(ctx: GraphicsContext, x: CGFloat, height: CGFloat, isBlack: Bool) {
+        let half = handleWidth / 2
+        // Vertical tick line
+        var line = Path()
+        line.move(to: CGPoint(x: x, y: 0))
+        line.addLine(to: CGPoint(x: x, y: height))
+        ctx.stroke(line, with: .color(isBlack ? Color(white: 0.25) : Color(white: 0.9)), lineWidth: 1.5)
+
+        // Triangle at bottom pointing upward (◂▸ like a slider thumb)
+        let ty = height - 1
+        var tri = Path()
+        tri.move(to: CGPoint(x: x - half, y: ty))
+        tri.addLine(to: CGPoint(x: x + half, y: ty))
+        tri.addLine(to: CGPoint(x: x, y: ty - half * 1.4))
+        tri.closeSubpath()
+
+        let fill: Color = isBlack ? Color(white: 0.15) : Color(white: 0.92)
+        let stroke: Color = isBlack ? Color(white: 0.6) : Color(white: 1.0)
+        ctx.fill(tri, with: .color(fill))
+        ctx.stroke(tri, with: .color(stroke), lineWidth: 1)
+    }
+
+    // MARK: - Histogram path helper
+
+    private func histogramPath(bins: [Float], in rect: CGRect) -> Path {
+        let binCount = bins.count
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+        for i in 0..<binCount {
+            let t = CGFloat(i) / CGFloat(binCount - 1)
+            let x = rect.minX + t * rect.width
+            let h = CGFloat(bins[i]) * rect.height
+            path.addLine(to: CGPoint(x: x, y: rect.maxY - h))
+        }
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
+
+    // MARK: - Gesture
+
+    private func onDrag(value: DragGesture.Value, width: CGFloat) {
+        guard width > 0 else { return }
+
+        if dragging == nil {
+            // Pick which handle to drag based on start location proximity
+            let bpX = CGFloat(blackPoint) * width
+            let wpX = CGFloat(whitePoint) * width
+            let startX = value.startLocation.x
+            let distBlack = abs(startX - bpX)
+            let distWhite = abs(startX - wpX)
+            if distBlack < hitSlop || distWhite < hitSlop {
+                dragging = distBlack <= distWhite ? .black : .white
+            } else {
+                return
+            }
+        }
+
+        let normalised = max(0, min(1, Double(value.location.x / width)))
+
+        switch dragging {
+        case .black:
+            blackPoint = min(normalised, whitePoint - minimumSpan)
+        case .white:
+            whitePoint = max(normalised, blackPoint + minimumSpan)
+        case nil:
+            break
+        }
+    }
+}

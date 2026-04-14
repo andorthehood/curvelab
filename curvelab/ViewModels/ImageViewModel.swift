@@ -18,6 +18,8 @@ class ImageViewModel: ObservableObject {
     @Published var showCropOverlay = false
     @Published var isNegative = false
     @Published var exportLinear = false
+    @Published var inputBlackPoint: Double = 0.0
+    @Published var inputWhitePoint: Double = 1.0
 
     var imageSize: CGSize {
         guard let ext = cachedImage?.extent else { return .zero }
@@ -56,6 +58,20 @@ class ImageViewModel: ObservableObject {
                 self.rebuildCache(invert: invert)
             }
             .store(in: &cancellables)
+
+        // Levels changes are real-time — just rebuild the LUT preview
+        Publishers.CombineLatest($inputBlackPoint, $inputWhitePoint)
+            .dropFirst()
+            .debounce(for: .milliseconds(16), scheduler: RunLoop.main)
+            .sink { [weak self] _ in self?.updatePreview() }
+            .store(in: &cancellables)
+
+        // Auto-save after levels settle
+        Publishers.CombineLatest($inputBlackPoint, $inputWhitePoint)
+            .dropFirst()
+            .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
+            .sink { [weak self] _ in self?.saveState() }
+            .store(in: &cancellables)
     }
 
     // MARK: - Import
@@ -76,9 +92,11 @@ class ImageViewModel: ObservableObject {
             .flatMap { try? JSONDecoder().decode(EditingState.self, from: $0) }
 
         // Capture values for the detached task
-        let rotation    = state?.rotation    ?? 0
-        let invertNeg   = state?.isNegative  ?? false
+        let rotation    = state?.rotation        ?? 0
+        let invertNeg   = state?.isNegative      ?? false
         let cropRect    = state?.appliedCropRect?.cgRect
+        let blackPoint  = state?.inputBlackPoint ?? 0.0
+        let whitePoint  = state?.inputWhitePoint ?? 1.0
         let context     = ciContext
 
         suppressCacheRebuild = true
@@ -108,6 +126,8 @@ class ImageViewModel: ObservableObject {
                 } ?? CropState(rect: .zero, isActive: false)
                 self.showCropOverlay = false
 
+                self.inputBlackPoint = blackPoint
+                self.inputWhitePoint = whitePoint
                 if let state { state.apply(to: self.curves) } else { self.curves.reset() }
 
                 self.suppressCacheRebuild = false
@@ -126,7 +146,8 @@ class ImageViewModel: ObservableObject {
             outputHistogram = nil
             return
         }
-        let preview = LUTGenerator.applyFilter(to: cachedImage, curves: curves)
+        let preview = LUTGenerator.applyFilter(to: cachedImage, curves: curves,
+                                               blackPoint: inputBlackPoint, whitePoint: inputWhitePoint)
         previewImage = preview
         let context = ciContext
         Task.detached {
@@ -231,6 +252,8 @@ class ImageViewModel: ObservableObject {
 
     func resetCurves() {
         curves.reset()
+        inputBlackPoint = 0.0
+        inputWhitePoint = 1.0
         updatePreview()
     }
 
@@ -287,6 +310,8 @@ class ImageViewModel: ObservableObject {
             rotation: rotationAngle,
             isNegative: isNegative,
             appliedCropRect: appliedCropRect,
+            inputBlackPoint: inputBlackPoint,
+            inputWhitePoint: inputWhitePoint,
             curves: curves
         )
         do {
