@@ -4,6 +4,9 @@ struct CurveEditorView: View {
     @ObservedObject var curves: CurveModel
     var histogram: HistogramData?
     @State private var draggingPointID: UUID?
+    /// Captures each point's X at the moment an ⌥-drag begins, so we can
+    /// apply a clean delta from start rather than accumulating per-frame drift.
+    @State private var shiftStartXs: [UUID: Double]?
 
     private let handleRadius: CGFloat = 6
     private let hitRadius: CGFloat = 14
@@ -35,6 +38,7 @@ struct CurveEditorView: View {
                         }
                         .onEnded { _ in
                             draggingPointID = nil
+                            shiftStartXs = nil
                         }
                 )
             }
@@ -193,11 +197,34 @@ struct CurveEditorView: View {
     // MARK: - Gestures
 
     private func onDrag(value: DragGesture.Value, size: CGFloat, origin: CGPoint) {
+        // ⌥ held — translate all points horizontally together
+        if NSEvent.modifierFlags.contains(.option) {
+            if shiftStartXs == nil {
+                shiftStartXs = Dictionary(
+                    uniqueKeysWithValues: curves.activeCurve.points.map { ($0.id, $0.x) }
+                )
+            }
+            guard let startXs = shiftStartXs else { return }
+            // Compute delta from the drag origin so there's no per-frame accumulation drift.
+            // Use the median point as the reference to get a single clean delta.
+            let deltaX = Double((value.location.x - value.startLocation.x) / size)
+            // Restore each point to its captured start X then apply delta — bypasses
+            // movePoint's neighbour-clamping which would cause bunching on large shifts.
+            for i in curves.activeCurve.points.indices {
+                let id = curves.activeCurve.points[i].id
+                if let originX = startXs[id] {
+                    curves.activeCurve.points[i].x = max(0, min(1, originX + deltaX))
+                }
+            }
+            return
+        }
+
+        // Normal single-point drag
+        shiftStartXs = nil
         let rect = CGRect(origin: origin, size: CGSize(width: size, height: size))
         let norm = screenToNormalized(value.location, size: size, origin: origin)
 
         if draggingPointID == nil {
-            // Find nearest existing point within hit radius
             let curve = curves.activeCurve
             var bestID: UUID?
             var bestDist: CGFloat = .infinity
@@ -218,7 +245,6 @@ struct CurveEditorView: View {
                 let startNorm = screenToNormalized(value.startLocation, size: size, origin: origin)
                 if startNorm.x > 0.01 && startNorm.x < 0.99 {
                     curves.activeCurve.addPoint(at: startNorm.x)
-                    // Find the newly added point (closest to startNorm.x)
                     let sorted = curves.activeCurve.sortedPoints
                     if let newPoint = sorted.min(by: { abs($0.x - startNorm.x) < abs($1.x - startNorm.x) }) {
                         draggingPointID = newPoint.id

@@ -52,6 +52,15 @@ struct ChannelCurve: Equatable {
         points.remove(at: index)
     }
 
+    /// Translates all control points horizontally by `delta` (normalised units),
+    /// clamping each to [0, 1].  All points move together so relative order and
+    /// spacing are preserved — no neighbour-clamping side effects.
+    mutating func shiftAllX(by delta: Double) {
+        for i in points.indices {
+            points[i].x = max(0, min(1, points[i].x + delta))
+        }
+    }
+
     mutating func movePoint(id: UUID, to newX: Double, y newY: Double) {
         guard let index = points.firstIndex(where: { $0.id == id }) else { return }
         let sorted = sortedPoints
