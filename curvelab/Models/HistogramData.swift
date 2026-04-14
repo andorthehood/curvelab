@@ -82,6 +82,29 @@ struct HistogramData {
         )
     }
 
+    /// Returns a copy with the first and last bins zeroed out and the remaining
+    /// bins re-normalised to their own peak.  Use this to prevent clipping
+    /// pile-up (from input levels) from dominating the histogram display scale.
+    var withClipEndsExcluded: HistogramData {
+        func strip(normalized: [Float], raw: [Float]) -> (norm: [Float], raw: [Float]) {
+            var n = normalized; var r = raw
+            n[0] = 0; n[n.count - 1] = 0
+            r[0] = 0; r[r.count - 1] = 0
+            let m = n.max() ?? 1
+            return (m > 0 ? n.map { $0 / m } : n, r)
+        }
+        let r = strip(normalized: red,   raw: rawRed)
+        let g = strip(normalized: green, raw: rawGreen)
+        let b = strip(normalized: blue,  raw: rawBlue)
+        var lum = luminance; lum[0] = 0; lum[lum.count - 1] = 0
+        let ml = lum.max() ?? 1
+        return HistogramData(
+            red:       r.norm, green: g.norm, blue: b.norm,
+            luminance: ml > 0 ? lum.map { $0 / ml } : lum,
+            rawRed:    r.raw,  rawGreen: g.raw, rawBlue: b.raw
+        )
+    }
+
     /// Remap this histogram through the given curves to produce the output histogram.
     func remapped(through curves: CurveModel) -> HistogramData {
         let rgbSpline = curves.rgb.spline()

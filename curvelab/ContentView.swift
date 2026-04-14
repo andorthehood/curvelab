@@ -6,6 +6,7 @@ struct ContentView: View {
     @StateObject private var recentFilesStore = RecentFilesStore()
 
     @State private var sidebarWidth: CGFloat = 320
+    @State private var excludeClipEnds: Bool = false
 
     private let minSidebarWidth:    CGFloat = 260
     private let minImageWidth:      CGFloat = 280
@@ -135,10 +136,18 @@ struct ContentView: View {
                         Divider()
 
                         // ── 3. Input levels ───────────────────────────────────
+                        HStack {
+                            Spacer()
+                            Toggle("Exclude clip ends", isOn: $excludeClipEnds)
+                                .toggleStyle(.checkbox)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
                         LevelsView(
                             blackPoint: $viewModel.inputBlackPoint,
                             whitePoint: $viewModel.inputWhitePoint,
-                            histogram: viewModel.histogram,
+                            histogram: hist(viewModel.histogram),
                             onLinkedBlackPointChanged: { viewModel.setBlackPointWithCurves($0) },
                             linkedBlackPointMax: viewModel.linkedBlackPointMax
                         )
@@ -150,7 +159,7 @@ struct ContentView: View {
                                 Text("After Levels")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                ResultHistogramView(histogram: levelsHistogram)
+                                ResultHistogramView(histogram: hist(levelsHistogram))
                             }
                         }
 
@@ -169,7 +178,7 @@ struct ContentView: View {
 
                         CurveEditorView(
                             curves: viewModel.curves,
-                            histogram: viewModel.levelsHistogram ?? viewModel.histogram
+                            histogram: hist(viewModel.levelsHistogram ?? viewModel.histogram)
                         )
                         .frame(maxWidth: .infinity)
 
@@ -179,7 +188,7 @@ struct ContentView: View {
                                 Text("Output")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                ResultHistogramView(histogram: outputHistogram)
+                                ResultHistogramView(histogram: hist(outputHistogram))
                             }
                         }
 
@@ -272,6 +281,14 @@ struct ContentView: View {
                 recentFilesStore.saveThumbnail(cg, for: entry.id)
             }
         }
+    }
+
+    // MARK: - Helpers
+
+    /// Applies the clip-ends exclusion to an optional histogram based on the current toggle state.
+    private func hist(_ h: HistogramData?) -> HistogramData? {
+        guard let h else { return nil }
+        return excludeClipEnds ? h.withClipEndsExcluded : h
     }
 }
 

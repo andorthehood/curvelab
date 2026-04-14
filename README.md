@@ -148,6 +148,7 @@ previewImage (lazy CIImage — LUT applied to cache)
 - [`docs/absorb-black-point.md`](docs/absorb-black-point.md) — technical explanation of the Absorb BP operation with proof of output equivalence
 - [`docs/linked-black-point.md`](docs/linked-black-point.md) — technical explanation of the linked black-point handle, its cap, and its relationship to Absorb BP
 - [`docs/curve-shift-strip.md`](docs/curve-shift-strip.md) — how the shift strip works, including the start-captured delta algorithm and jump-back behaviour
+- [`docs/exclude-clip-ends.md`](docs/exclude-clip-ends.md) — why clipping spikes crush the histogram display and how the exclusion re-normalisation works
 
 ## Requirements
 
