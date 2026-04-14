@@ -3,8 +3,6 @@ import SwiftUI
 struct CurveEditorView: View {
     @ObservedObject var curves: CurveModel
     var histogram: HistogramData?
-    var blackPoint: Double = 0
-    var whitePoint: Double = 1
     @State private var draggingPointID: UUID?
 
     private let handleRadius: CGFloat = 6
@@ -101,21 +99,13 @@ struct CurveEditorView: View {
         }
 
         let binCount = bins.count
-        let lo = blackPoint
-        let hi = whitePoint
-        let levelsRange = hi - lo
 
         var path = Path()
         path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
 
         for i in 0..<binCount {
-            // Raw normalised position 0…1 for this bin
-            let raw = Double(i) / Double(binCount - 1)
-            // Remap through levels range so the visible window stretches to fill full width
-            let displayT: Double = levelsRange > 0
-                ? max(0, min(1, (raw - lo) / levelsRange))
-                : Double(i) / Double(binCount - 1)
-            let x = rect.minX + CGFloat(displayT) * rect.width
+            let t = CGFloat(i) / CGFloat(binCount - 1)
+            let x = rect.minX + t * rect.width
             let h = CGFloat(bins[i]) * rect.height
             path.addLine(to: CGPoint(x: x, y: rect.maxY - h))
         }

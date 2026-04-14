@@ -52,18 +52,13 @@ struct ContentView: View {
                             Text("After Levels")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            ResultHistogramView(
-                                histogram: levelsHistogram,
-                                activeChannel: .rgb
-                            )
+                            ResultHistogramView(histogram: levelsHistogram)
                         }
                     }
 
                     CurveEditorView(
                         curves: viewModel.curves,
-                        histogram: viewModel.levelsHistogram ?? viewModel.histogram,
-                        blackPoint: 0,
-                        whitePoint: 1
+                        histogram: viewModel.levelsHistogram ?? viewModel.histogram
                     )
                     .frame(maxWidth: .infinity)
 
@@ -72,10 +67,7 @@ struct ContentView: View {
                             Text("Output")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            ResultHistogramView(
-                                histogram: outputHistogram,
-                                activeChannel: .rgb
-                            )
+                            ResultHistogramView(histogram: outputHistogram)
                         }
                     }
 
