@@ -14,7 +14,6 @@ struct ContentView: View {
                                     min(geo.size.width - minImageWidth, sidebarWidth))
             let dividerX = geo.size.width - clampedSidebar  // left edge of divider in layout space
 
-            ZStack(alignment: .topLeading) {
             HStack(spacing: 0) {
                 // Left: Image preview + crop overlay
                 let previewSize = CGSize(width: dividerX - 6, height: geo.size.height)
@@ -45,12 +44,25 @@ struct ContentView: View {
                 }
                 .frame(width: dividerX - 6)
 
-                // Visual divider — no interaction, just appearance
+                // Divider — gesture uses named coordinate space so value.location.x
+                // is always in the stable HStack frame, not the divider's moving frame.
                 ZStack {
                     Color(white: 0.18)
                     Color(white: 0.3).frame(width: 1)
                 }
                 .frame(width: 6)
+                .onHover { hovering in
+                    if hovering { NSCursor.resizeLeftRight.push() }
+                    else        { NSCursor.pop() }
+                }
+                .gesture(
+                    DragGesture(minimumDistance: 1, coordinateSpace: .named("layout"))
+                        .onChanged { value in
+                            let newWidth = geo.size.width - value.location.x
+                            sidebarWidth = max(minSidebarWidth,
+                                               min(geo.size.width - minImageWidth, newWidth))
+                        }
+                )
 
                 // Right: editing panel — ordered to match the processing pipeline
                 ScrollView(.vertical, showsIndicators: true) {
@@ -166,28 +178,7 @@ struct ContentView: View {
                     .padding()
                 }
                 .frame(width: clampedSidebar)
-            } // HStack
-
-            // Transparent drag strip — lives in the stable ZStack coordinate space
-            // so value.location.x never shifts as the divider moves.
-            Color.clear
-                .frame(width: 12, height: geo.size.height)
-                .contentShape(Rectangle())
-                .position(x: dividerX - 3, y: geo.size.height / 2)
-                .onHover { hovering in
-                    if hovering { NSCursor.resizeLeftRight.push() }
-                    else        { NSCursor.pop() }
-                }
-                .gesture(
-                    DragGesture(minimumDistance: 0, coordinateSpace: .named("layout"))
-                        .onChanged { value in
-                            let newWidth = geo.size.width - value.location.x
-                            sidebarWidth = max(minSidebarWidth,
-                                               min(geo.size.width - minImageWidth, newWidth))
-                        }
-                )
-
-            } // ZStack
+            }
             .coordinateSpace(name: "layout")
         }
         .navigationTitle(viewModel.fileName)
