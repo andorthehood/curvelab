@@ -37,7 +37,14 @@ struct CropOverlayView: View {
     enum HandleKind: CaseIterable, Hashable {
         case topLeft, topRight, bottomLeft, bottomRight
         case topMid, bottomMid, leftMid, rightMid
+        case body   // dragging the interior moves the whole box
     }
+
+    /// The eight resize handles — excludes .body which has no fixed screen position.
+    private let resizeHandles: [HandleKind] = [
+        .topLeft, .topRight, .bottomLeft, .bottomRight,
+        .topMid, .bottomMid, .leftMid, .rightMid
+    ]
 
     private func handleCenter(for kind: HandleKind, in box: CGRect) -> CGPoint {
         switch kind {
@@ -49,19 +56,24 @@ struct CropOverlayView: View {
         case .bottomMid:   return CGPoint(x: box.midX, y: box.maxY)
         case .leftMid:     return CGPoint(x: box.minX, y: box.midY)
         case .rightMid:    return CGPoint(x: box.maxX, y: box.midY)
+        case .body:        return CGPoint(x: box.midX, y: box.midY)
         }
     }
 
     private let hitRadius: CGFloat = 20
 
     private func nearestHandle(to point: CGPoint, in box: CGRect) -> HandleKind? {
-        let closest = HandleKind.allCases.min {
+        // Check resize handles first
+        let closest = resizeHandles.min {
             dist(handleCenter(for: $0, in: box), point) <
             dist(handleCenter(for: $1, in: box), point)
         }
-        guard let closest,
-              dist(handleCenter(for: closest, in: box), point) <= hitRadius else { return nil }
-        return closest
+        if let closest, dist(handleCenter(for: closest, in: box), point) <= hitRadius {
+            return closest
+        }
+        // Fall back to body drag if inside the box
+        if box.contains(point) { return .body }
+        return nil
     }
 
     private func dist(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
@@ -74,6 +86,7 @@ struct CropOverlayView: View {
         case .leftMid, .rightMid:        return .resizeLeftRight
         case .topLeft, .bottomRight:     return .crosshair
         case .topRight, .bottomLeft:     return .crosshair
+        case .body:                      return .openHand
         case nil:                        return .arrow
         }
     }
@@ -89,6 +102,14 @@ struct CropOverlayView: View {
 
         // 1. Apply unconstrained delta
         switch kind {
+        // Body drag: translate the whole rectangle, no resize
+        case .body:
+            r.origin.x += dx
+            r.origin.y += dy
+            cropState = CropState(rect: r, isActive: cropState.isActive)
+                .clamped(to: CGRect(origin: .zero, size: imageSize))
+            return
+
         // "top" in view = maxY in CIImage: change height only, origin.y fixed
         case .topLeft:
             r.origin.x    += dx;  r.size.width  -= dx   // left edge
@@ -140,6 +161,8 @@ struct CropOverlayView: View {
                 let midX = r.midX
                 r.size.width  = r.size.height * ratio
                 r.origin.x    = midX - r.size.width / 2
+            case .body:
+                break   // body drag returned early above; unreachable
             }
         }
 
@@ -178,8 +201,8 @@ struct CropOverlayView: View {
                     ctx.stroke(grid, with: .color(.white.opacity(0.45)), lineWidth: 0.75)
                 }
 
-                // Draw handle dots
-                for kind in HandleKind.allCases {
+                // Draw handle dots (resize handles only, not .body)
+                for kind in resizeHandles {
                     let c = handleCenter(for: kind, in: box)
                     let dot = CGRect(x: c.x - 5, y: c.y - 5, width: 10, height: 10)
                     ctx.fill(Path(dot), with: .color(.white))

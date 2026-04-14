@@ -58,12 +58,18 @@ struct ContentView: View {
 
                             // Aspect ratio toggle buttons
                             let presets: [(String, CGSize?)] = [
-                                ("Free",  nil),
-                                ("1:1",   CGSize(width: 1,  height: 1)),
-                                ("16:9",  CGSize(width: 16, height: 9)),
-                                ("2:3",   CGSize(width: 2,  height: 3)),
+                                ("Free", nil),
+                                ("1:1",  CGSize(width: 1,  height: 1)),
+                                ("2:3",  CGSize(width: 2,  height: 3)),
+                                ("3:2",  CGSize(width: 3,  height: 2)),
+                                ("4:5",  CGSize(width: 4,  height: 5)),
+                                ("5:4",  CGSize(width: 5,  height: 4)),
+                                ("16:9", CGSize(width: 16, height: 9)),
                             ]
-                            HStack(spacing: 4) {
+                            LazyVGrid(
+                                columns: [GridItem(.adaptive(minimum: 48, maximum: 72))],
+                                spacing: 4
+                            ) {
                                 ForEach(presets, id: \.0) { label, size in
                                     let selected = viewModel.cropAspectRatio == size
                                     Button(label) {
@@ -71,7 +77,7 @@ struct ContentView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .font(.caption)
-                                    .padding(.horizontal, 8)
+                                    .frame(maxWidth: .infinity)
                                     .padding(.vertical, 4)
                                     .background(selected
                                         ? Color.accentColor
@@ -81,7 +87,6 @@ struct ContentView: View {
                                         : Color.secondary)
                                     .cornerRadius(4)
                                 }
-                                Spacer()
                             }
                             .disabled(!viewModel.showCropOverlay || !hasImage)
 
