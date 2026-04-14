@@ -17,6 +17,7 @@ class ImageViewModel: ObservableObject {
     @Published var rotationAngle: Double = 0
     @Published var cropState: CropState = CropState(rect: .zero, isActive: false)
     @Published var showCropOverlay = false
+    @Published var cropAspectRatio: CGSize? = nil
     @Published var isNegative = false
     @Published var exportLinear = false
     @Published var inputBlackPoint: Double = 0.0
@@ -126,6 +127,7 @@ class ImageViewModel: ObservableObject {
                         : CropState.full(for: $0)
                 } ?? CropState(rect: .zero, isActive: false)
                 self.showCropOverlay = false
+                self.cropAspectRatio = nil
 
                 self.inputBlackPoint = blackPoint
                 self.inputWhitePoint = whitePoint

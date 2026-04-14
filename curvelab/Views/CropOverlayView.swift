@@ -4,6 +4,7 @@ struct CropOverlayView: View {
     @Binding var cropState: CropState
     let imageSize: CGSize
     let viewSize: CGSize
+    var aspectRatio: CGSize? = nil
 
     @State private var isDragging      = false
     @State private var activeHandle: HandleKind? = nil
@@ -86,6 +87,7 @@ struct CropOverlayView: View {
         var r = cropState.rect
         let minSize = CropState.minimumSize
 
+        // 1. Apply unconstrained delta
         switch kind {
         // "top" in view = maxY in CIImage: change height only, origin.y fixed
         case .topLeft:
@@ -114,6 +116,34 @@ struct CropOverlayView: View {
             r.size.width  += dx
         }
 
+        // 2. Enforce aspect ratio before minSize so anchor geometry stays clean.
+        //    The opposite edge is algebraically preserved by the delta above (e.g.
+        //    topLeft: maxX = origin.x+w is unchanged), so we can read it from r.
+        if let ar = aspectRatio {
+            let ratio = ar.width / ar.height
+            switch kind {
+            case .topLeft, .topRight:
+                // bottom edge (origin.y) is the anchor
+                r.size.height = r.size.width / ratio
+            case .bottomLeft, .bottomRight:
+                // top edge (maxY) is the anchor — preserved by origin.y±dy + height∓dy
+                let topY = r.maxY
+                r.size.height = r.size.width / ratio
+                r.origin.y    = topY - r.size.height
+            case .leftMid, .rightMid:
+                // vertical centre is the anchor (origin.y unchanged, height unchanged)
+                let midY = r.midY
+                r.size.height = r.size.width / ratio
+                r.origin.y    = midY - r.size.height / 2
+            case .topMid, .bottomMid:
+                // horizontal centre is the anchor (origin.x unchanged, width unchanged)
+                let midX = r.midX
+                r.size.width  = r.size.height * ratio
+                r.origin.x    = midX - r.size.width / 2
+            }
+        }
+
+        // 3. Enforce minimum size
         if r.size.width  < minSize { r.size.width  = minSize }
         if r.size.height < minSize { r.size.height = minSize }
 
