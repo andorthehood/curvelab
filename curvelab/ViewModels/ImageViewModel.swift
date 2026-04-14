@@ -14,6 +14,15 @@ class ImageViewModel: ObservableObject {
     @Published var histogram: HistogramData?
     @Published var rotationAngle: Double = 0 // degrees: 0, 90, 180, 270
     @Published var hdrPreview = false
+    @Published var cropState: CropState = CropState(rect: .zero, isActive: false)
+    @Published var showCropOverlay = false
+
+    var imageSize: CGSize {
+        guard let ext = cachedImage?.extent else { return .zero }
+        return CGSize(width: ext.width, height: ext.height)
+    }
+
+    var hasCachedImage: Bool { cachedImage != nil }
 
     // Cached pixel buffer of the (possibly rotated) decoded original.
     // Curve adjustments apply only to this — no DNG re-decode on every drag.
@@ -57,6 +66,9 @@ class ImageViewModel: ObservableObject {
                 self.rotationAngle = 0
                 self.histogram = histData
                 self.curves.reset()
+                self.cropState = cached.map { CropState.full(for: $0) }
+                    ?? CropState(rect: .zero, isActive: false)
+                self.showCropOverlay = false
                 self.updatePreview()
                 self.isLoading = false
             }
@@ -91,6 +103,8 @@ class ImageViewModel: ObservableObject {
             let cached = Self.renderToBuffer(rotated, context: context)
             await MainActor.run {
                 self.cachedImage = cached
+                self.cropState = cached.map { CropState.full(for: $0) }
+                    ?? CropState(rect: .zero, isActive: false)
                 self.updatePreview()
                 self.isLoading = false
             }
@@ -163,6 +177,50 @@ class ImageViewModel: ObservableObject {
                 options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.92]
             )
             await MainActor.run { self.isLoading = false }
+        }
+    }
+
+    func applyCrop() {
+        guard let originalImage else { return }
+        // Clamp the crop rect to the current image extent before using it
+        let clampedState = cropState.clamped(to: originalImage.extent)
+        let cropped = originalImage.cropped(to: clampedState.rect)
+        // Normalise origin to (0,0) — required before renderToBuffer
+        let normalised = cropped.transformed(by: CGAffineTransform(
+            translationX: -cropped.extent.minX,
+            y: -cropped.extent.minY
+        ))
+        isLoading = true
+        let context = ciContext
+        Task.detached {
+            let cached = Self.renderToBuffer(normalised, context: context)
+            let histData = cached.flatMap { HistogramData.compute(from: $0) }
+            await MainActor.run {
+                self.cachedImage = cached
+                self.histogram = histData
+                self.cropState = cached.map { CropState(rect: $0.extent, isActive: true) }
+                    ?? CropState(rect: .zero, isActive: false)
+                self.updatePreview()
+                self.isLoading = false
+            }
+        }
+    }
+
+    func resetCrop() {
+        guard let originalImage else { return }
+        isLoading = true
+        let context = ciContext
+        Task.detached {
+            let cached = Self.renderToBuffer(originalImage, context: context)
+            let histData = cached.flatMap { HistogramData.compute(from: $0) }
+            await MainActor.run {
+                self.cachedImage = cached
+                self.histogram = histData
+                self.cropState = cached.map { CropState.full(for: $0) }
+                    ?? CropState(rect: .zero, isActive: false)
+                self.updatePreview()
+                self.isLoading = false
+            }
         }
     }
 

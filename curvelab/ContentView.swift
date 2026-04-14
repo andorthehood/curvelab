@@ -6,7 +6,8 @@ struct ContentView: View {
     var body: some View {
         GeometryReader { geo in
             HStack(spacing: 0) {
-                // Left: Image preview
+                // Left: Image preview + crop overlay
+                let previewSize = CGSize(width: geo.size.width / 2, height: geo.size.height)
                 ZStack {
                     Color(white: 0.12)
                     if viewModel.isLoading {
@@ -22,6 +23,13 @@ struct ContentView: View {
                             Text("Import a DNG to get started")
                                 .foregroundStyle(.gray)
                         }
+                    }
+                    if viewModel.hasCachedImage && viewModel.showCropOverlay {
+                        CropOverlayView(
+                            cropState: $viewModel.cropState,
+                            imageSize: viewModel.imageSize,
+                            viewSize: previewSize
+                        )
                     }
                 }
                 .frame(width: geo.size.width / 2)
@@ -49,6 +57,18 @@ struct ContentView: View {
 
                     Toggle("HDR Preview", isOn: $viewModel.hdrPreview)
                         .toggleStyle(.checkbox)
+
+                    Toggle("Show Crop", isOn: $viewModel.showCropOverlay)
+                        .toggleStyle(.checkbox)
+                        .disabled(viewModel.originalImage == nil)
+
+                    HStack {
+                        Button("Apply Crop") { viewModel.applyCrop() }
+                            .disabled(viewModel.originalImage == nil)
+                        Button("Reset Crop") { viewModel.resetCrop() }
+                            .disabled(!viewModel.cropState.isActive)
+                    }
+                    .disabled(!viewModel.showCropOverlay)
 
                     Spacer()
                 }
