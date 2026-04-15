@@ -113,36 +113,134 @@ struct HistogramData {
     /// Matches `LUTGenerator.buildCubeData`'s levels formula exactly: when
     /// `range <= 0`, every bin collapses to 0 (same behaviour the LUT uses).
     ///
-    /// Note: a 256→256 bin remap accumulates small rounding as neighbouring
-    /// source bins get floored into the same output bin. Indistinguishable
-    /// from a pixel walk at display resolution; not appropriate for numerical
-    /// QA reports.
+    /// Uses area distribution (see `distribute`) so a stretch (range < 1)
+    /// doesn't leave gaps between non-adjacent output bins; a pixel walk
+    /// naturally produces smooth output, and this bin-remap matches it by
+    /// treating each source bin `i` as the half-open interval
+    /// `[i/256, (i+1)/256)` and spreading its count across every output
+    /// bin the transformed interval overlaps.
     func remapped(throughLevels blackPoint: Double, whitePoint: Double) -> HistogramData {
         let range = whitePoint - blackPoint
+        func leveled(_ t: Double) -> Double {
+            range > 0 ? max(0, min(1, (t - blackPoint) / range)) : 0
+        }
 
         var outRed   = [Float](repeating: 0, count: 256)
         var outGreen = [Float](repeating: 0, count: 256)
         var outBlue  = [Float](repeating: 0, count: 256)
 
         for i in 0..<256 {
-            let t       = Double(i) / 255.0
-            let leveled = range > 0 ? max(0, min(1, (t - blackPoint) / range)) : 0
-            let bin     = min(255, max(0, Int(leveled * 255.0)))
+            let t0 = Double(i)     / 256.0
+            let t1 = Double(i + 1) / 256.0
+            let o0 = leveled(t0)
+            let o1 = leveled(t1)
 
-            outRed[bin]   += rawRed[i]
-            outGreen[bin] += rawGreen[i]
-            outBlue[bin]  += rawBlue[i]
+            Self.distribute(count: rawRed[i],   from: o0, to: o1, into: &outRed)
+            Self.distribute(count: rawGreen[i], from: o0, to: o1, into: &outGreen)
+            Self.distribute(count: rawBlue[i],  from: o0, to: o1, into: &outBlue)
         }
 
-        // Luminance is derived from the remapped channels, same convention
-        // as `compute` and `remapped(through:)`.
-        var outLum = [Float](repeating: 0, count: 256)
+        return Self.assemble(outRed: outRed, outGreen: outGreen, outBlue: outBlue)
+    }
+
+    /// Remap this histogram through the given curves to produce the output histogram.
+    /// See `remapped(throughLevels:whitePoint:)` for notes on area distribution —
+    /// same approach applies here, with the added wrinkle that curves aren't
+    /// guaranteed to be monotonic (users can invert or fold them), so
+    /// `distribute` accepts `from >= to` and flips internally.
+    func remapped(through curves: CurveModel) -> HistogramData {
+        let rgbSpline   = curves.rgb.spline()
+        let redSpline   = curves.red.spline()
+        let greenSpline = curves.green.spline()
+        let blueSpline  = curves.blue.spline()
+
+        var outRed   = [Float](repeating: 0, count: 256)
+        var outGreen = [Float](repeating: 0, count: 256)
+        var outBlue  = [Float](repeating: 0, count: 256)
+
         for i in 0..<256 {
+            let t0 = Double(i)     / 256.0
+            let t1 = Double(i + 1) / 256.0
+
+            // Apply RGB composite then per-channel, same order as LUTGenerator.
+            let rgb0 = rgbSpline.evaluate(at: t0)
+            let rgb1 = rgbSpline.evaluate(at: t1)
+
+            let r0 = redSpline.evaluate(at: rgb0)
+            let r1 = redSpline.evaluate(at: rgb1)
+            Self.distribute(count: rawRed[i], from: r0, to: r1, into: &outRed)
+
+            let g0 = greenSpline.evaluate(at: rgb0)
+            let g1 = greenSpline.evaluate(at: rgb1)
+            Self.distribute(count: rawGreen[i], from: g0, to: g1, into: &outGreen)
+
+            let b0 = blueSpline.evaluate(at: rgb0)
+            let b1 = blueSpline.evaluate(at: rgb1)
+            Self.distribute(count: rawBlue[i], from: b0, to: b1, into: &outBlue)
+        }
+
+        return Self.assemble(outRed: outRed, outGreen: outGreen, outBlue: outBlue)
+    }
+
+    // MARK: - Remap helpers
+
+    /// Distributes `count` across the bins of `out` in proportion to how much
+    /// of each integer bin `[b, b+1)` is covered by the output interval
+    /// `[lo, hi)` in *bin-index space*. `from` and `hi` are provided in
+    /// normalised [0, 1] value space and converted internally; ordering is
+    /// normalised so non-monotonic transforms work.
+    ///
+    /// This is the histogram analogue of "area sampling" — a source bin that
+    /// stretches across multiple output bins contributes to each in proportion
+    /// to coverage, preventing the picket-fence effect that point-binning
+    /// (`Int(t * N)`) produces when the transform's slope is not exactly 1.
+    /// Collapses to a single bin when the interval degenerates.
+    private static func distribute(count: Float,
+                                   from valueLow: Double, to valueHigh: Double,
+                                   into out: inout [Float]) {
+        let binCount = out.count
+        var lo = min(valueLow, valueHigh)
+        var hi = max(valueLow, valueHigh)
+        lo = max(0, min(1, lo))
+        hi = max(0, min(1, hi))
+
+        // Degenerate interval — dump everything into the bin that contains it.
+        if hi - lo < 1e-12 {
+            let bin = min(binCount - 1, max(0, Int(lo * Double(binCount))))
+            out[bin] += count
+            return
+        }
+
+        // Convert to output-bin-index space.
+        let loIdx = lo * Double(binCount)
+        let hiIdx = hi * Double(binCount)
+        let span  = hiIdx - loIdx
+
+        let startBin = max(0, Int(floor(loIdx)))
+        let endBin   = min(binCount - 1, Int(ceil(hiIdx)) - 1)
+        guard startBin <= endBin else { return }
+
+        for b in startBin...endBin {
+            let binLo   = Double(b)
+            let binHi   = Double(b + 1)
+            let overlap = min(hiIdx, binHi) - max(loIdx, binLo)
+            if overlap > 0 {
+                out[b] += Float(Double(count) * overlap / span)
+            }
+        }
+    }
+
+    /// Builds a normalised `HistogramData` from three raw channel bin arrays.
+    /// Derives luminance from the remapped channels and handles empty channels
+    /// (max == 0) without producing NaNs.
+    private static func assemble(outRed: [Float],
+                                 outGreen: [Float],
+                                 outBlue: [Float]) -> HistogramData {
+        var outLum = [Float](repeating: 0, count: outRed.count)
+        for i in 0..<outRed.count {
             outLum[i] = 0.299 * outRed[i] + 0.587 * outGreen[i] + 0.114 * outBlue[i]
         }
 
-        // Guard against an entirely-empty channel (e.g. extreme user levels
-        // collapse every pixel to 0) so we don't produce NaNs on normalise.
         func norm(_ bins: [Float]) -> [Float] {
             let m = bins.max() ?? 0
             return m > 0 ? bins.map { $0 / m } : bins
@@ -156,57 +254,6 @@ struct HistogramData {
             rawRed:    outRed,
             rawGreen:  outGreen,
             rawBlue:   outBlue
-        )
-    }
-
-    /// Remap this histogram through the given curves to produce the output histogram.
-    func remapped(through curves: CurveModel) -> HistogramData {
-        let rgbSpline = curves.rgb.spline()
-        let redSpline = curves.red.spline()
-        let greenSpline = curves.green.spline()
-        let blueSpline = curves.blue.spline()
-
-        var outRed = [Float](repeating: 0, count: 256)
-        var outGreen = [Float](repeating: 0, count: 256)
-        var outBlue = [Float](repeating: 0, count: 256)
-
-        for i in 0..<256 {
-            let t = Double(i) / 255.0
-
-            // Apply RGB composite then per-channel, same order as LUTGenerator
-            let rOut = redSpline.evaluate(at: rgbSpline.evaluate(at: t))
-            let gOut = greenSpline.evaluate(at: rgbSpline.evaluate(at: t))
-            let bOut = blueSpline.evaluate(at: rgbSpline.evaluate(at: t))
-
-            let rBin = min(255, max(0, Int(rOut * 255.0)))
-            let gBin = min(255, max(0, Int(gOut * 255.0)))
-            let bBin = min(255, max(0, Int(bOut * 255.0)))
-
-            outRed[rBin] += rawRed[i]
-            outGreen[gBin] += rawGreen[i]
-            outBlue[bBin] += rawBlue[i]
-        }
-
-        // Compute luminance from remapped channels
-        var outLum = [Float](repeating: 0, count: 256)
-        for i in 0..<256 {
-            let lum = 0.299 * outRed[i] + 0.587 * outGreen[i] + 0.114 * outBlue[i]
-            outLum[i] = lum
-        }
-
-        let maxR = outRed.max() ?? 1
-        let maxG = outGreen.max() ?? 1
-        let maxB = outBlue.max() ?? 1
-        let maxL = outLum.max() ?? 1
-
-        return HistogramData(
-            red: outRed.map { $0 / maxR },
-            green: outGreen.map { $0 / maxG },
-            blue: outBlue.map { $0 / maxB },
-            luminance: outLum.map { $0 / maxL },
-            rawRed: outRed,
-            rawGreen: outGreen,
-            rawBlue: outBlue
         )
     }
 }
