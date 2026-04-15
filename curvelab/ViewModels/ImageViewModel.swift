@@ -640,15 +640,7 @@ class ImageViewModel: ObservableObject {
     /// and directly before every one-shot mutation (rotate, crop, reset, preset apply, absorbBP).
     func recordUndoPoint() {
         guard sourceURL != nil else { return }
-        let state = EditingState(
-            rotation: rotationAngle,
-            isNegative: isNegative,
-            appliedCropRect: appliedCropRect,
-            inputBlackPoint: inputBlackPoint,
-            inputWhitePoint: inputWhitePoint,
-            curves: curves
-        )
-        guard let data = try? JSONEncoder().encode(state) else { return }
+        guard let data = try? JSONEncoder().encode(currentEditingState()) else { return }
         guard data != lastSavedData else { return }   // nothing changed — skip
         if let previous = lastSavedData {
             undoStack.append(previous)
@@ -700,12 +692,10 @@ class ImageViewModel: ObservableObject {
 
     // MARK: - Sidecar save / load
 
-    func saveState() {
-        guard let url = sourceURL else {
-            print("[CurveLab] saveState: no sourceURL set")
-            return
-        }
-        let state = EditingState(
+    /// Snapshot of all current editing decisions.
+    /// Single source of truth — used by `recordUndoPoint()`, `saveState()`, and `capturePreset()`.
+    private func currentEditingState() -> EditingState {
+        EditingState(
             rotation: rotationAngle,
             isNegative: isNegative,
             appliedCropRect: appliedCropRect,
@@ -713,7 +703,14 @@ class ImageViewModel: ObservableObject {
             inputWhitePoint: inputWhitePoint,
             curves: curves
         )
-        guard let data = try? JSONEncoder().encode(state) else { return }
+    }
+
+    func saveState() {
+        guard let url = sourceURL else {
+            print("[CurveLab] saveState: no sourceURL set")
+            return
+        }
+        guard let data = try? JSONEncoder().encode(currentEditingState()) else { return }
         lastSavedData = data
 
         do {
