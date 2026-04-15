@@ -24,6 +24,21 @@ actor RenderPipeline {
         self.context = context
     }
 
+    // MARK: - Original-image cache
+
+    /// Returns a previously-cached decoded original for `url`, or `nil` if it
+    /// has been evicted. Used by `loadFile` to skip redundant DNG decodes.
+    func original(for url: URL) -> CIImage? {
+        cache.original(for: url)
+    }
+
+    /// Stores a decoded original keyed by file URL.
+    func setOriginal(_ image: CIImage, for url: URL) {
+        cache.setOriginal(image, for: url)
+    }
+
+    // MARK: - Render
+
     /// Renders `config` from the supplied decoded original.
     ///
     /// Returns `nil` when a newer render has superseded this call, or when
