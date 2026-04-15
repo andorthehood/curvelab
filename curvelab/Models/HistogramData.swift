@@ -105,6 +105,60 @@ struct HistogramData {
         )
     }
 
+    /// Remaps every bin through the input-levels transform
+    ///     t' = clamp((t - blackPoint) / (whitePoint - blackPoint), 0, 1)
+    /// producing a post-levels histogram from a pre-levels one. Pure CPU, no
+    /// pixel data — designed to be called on every curve/levels frame.
+    ///
+    /// Matches `LUTGenerator.buildCubeData`'s levels formula exactly: when
+    /// `range <= 0`, every bin collapses to 0 (same behaviour the LUT uses).
+    ///
+    /// Note: a 256→256 bin remap accumulates small rounding as neighbouring
+    /// source bins get floored into the same output bin. Indistinguishable
+    /// from a pixel walk at display resolution; not appropriate for numerical
+    /// QA reports.
+    func remapped(throughLevels blackPoint: Double, whitePoint: Double) -> HistogramData {
+        let range = whitePoint - blackPoint
+
+        var outRed   = [Float](repeating: 0, count: 256)
+        var outGreen = [Float](repeating: 0, count: 256)
+        var outBlue  = [Float](repeating: 0, count: 256)
+
+        for i in 0..<256 {
+            let t       = Double(i) / 255.0
+            let leveled = range > 0 ? max(0, min(1, (t - blackPoint) / range)) : 0
+            let bin     = min(255, max(0, Int(leveled * 255.0)))
+
+            outRed[bin]   += rawRed[i]
+            outGreen[bin] += rawGreen[i]
+            outBlue[bin]  += rawBlue[i]
+        }
+
+        // Luminance is derived from the remapped channels, same convention
+        // as `compute` and `remapped(through:)`.
+        var outLum = [Float](repeating: 0, count: 256)
+        for i in 0..<256 {
+            outLum[i] = 0.299 * outRed[i] + 0.587 * outGreen[i] + 0.114 * outBlue[i]
+        }
+
+        // Guard against an entirely-empty channel (e.g. extreme user levels
+        // collapse every pixel to 0) so we don't produce NaNs on normalise.
+        func norm(_ bins: [Float]) -> [Float] {
+            let m = bins.max() ?? 0
+            return m > 0 ? bins.map { $0 / m } : bins
+        }
+
+        return HistogramData(
+            red:       norm(outRed),
+            green:     norm(outGreen),
+            blue:      norm(outBlue),
+            luminance: norm(outLum),
+            rawRed:    outRed,
+            rawGreen:  outGreen,
+            rawBlue:   outBlue
+        )
+    }
+
     /// Remap this histogram through the given curves to produce the output histogram.
     func remapped(through curves: CurveModel) -> HistogramData {
         let rgbSpline = curves.rgb.spline()
