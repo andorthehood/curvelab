@@ -48,7 +48,17 @@ class ImageViewModel: ObservableObject {
 
     /// Owns the buffer / histogram / original LRU caches feeding the render
     /// pipeline. See `RenderCache` for capacity tuning rationale.
+    ///
+    /// TEMPORARY during the refactor (docs/todos/20): legacy paths (applyCrop,
+    /// resetCrop, loadFile) still use this cache directly. The migrated path
+    /// (rebuildCache) routes through `pipeline` which owns its own `RenderCache`.
+    /// Steps 5–6 consolidate both call sites onto the pipeline's cache.
     private let renderCache = RenderCache()
+
+    /// Serialized render pipeline with generation-based supersession. Only
+    /// `rebuildCache` currently routes through here; other paths migrate in
+    /// Steps 5–6.
+    private lazy var pipeline = RenderPipeline(context: ciContext)
 
     /// Snapshot of the current pixel-pipeline configuration, or `nil` when no
     /// file is loaded. `invertOverride` lets callers build a config reflecting
@@ -311,49 +321,28 @@ class ImageViewModel: ObservableObject {
     }
 
     private func rebuildCache(invert: Bool? = nil) {
-        guard let base = preparedBase(invert: invert) else { return }
+        guard let original = originalImage,
+              let config   = currentRenderConfig(invertOverride: invert) else { return }
         isLoading = true
+        let hasCrop = config.cropRect != nil
 
-        let imageToCache = RenderEngine.crop(appliedCropRect, to: base)
-        let hasCrop  = appliedCropRect != nil
-        let context  = ciContext
-        let config   = currentRenderConfig(invertOverride: invert)
-
-        // Fast path: this exact configuration is already cached
-        if let config, let cached = renderCache.buffer(for: config) {
-            Task.detached {
-                let histData = HistogramData.compute(from: cached, context: context)
-                await MainActor.run {
-                    self.cachedImage = cached
-                    self.histogram   = histData
-                    self.cropState   = hasCrop
-                        ? CropState(rect: cached.extent, isActive: true)
-                        : CropState.full(for: cached)
-                    self.cacheVersion = UUID()
-                    self.updatePreview()
-                    self.isLoading = false
-                    self.saveState()
-                }
+        Task { [pipeline] in
+            guard let result = await pipeline.render(config, from: original) else {
+                // Superseded by a newer render, or render failed. Don't
+                // mutate UI state — the newer render (if any) will own the
+                // next update. isLoading is intentionally left set; the final
+                // completing render will clear it.
+                return
             }
-            return
-        }
-
-        Task.detached {
-            let cached   = RenderEngine.renderToBuffer(imageToCache, context: context)
-            let histData = cached.flatMap { HistogramData.compute(from: $0, context: context) }
-            await MainActor.run {
-                if let config, let cached { self.renderCache.setBuffer(cached, for: config) }
-                if let config, let histData { self.renderCache.setHistogram(histData, for: config) }
-                self.cachedImage = cached
-                self.histogram   = histData
-                self.cropState   = cached.map {
-                    hasCrop ? CropState(rect: $0.extent, isActive: true) : CropState.full(for: $0)
-                } ?? CropState(rect: .zero, isActive: false)
-                self.cacheVersion = UUID()
-                self.updatePreview()
-                self.isLoading = false
-                self.saveState()
-            }
+            self.cachedImage  = result.cachedImage
+            self.histogram    = result.histogram
+            self.cropState    = hasCrop
+                ? CropState(rect: result.extent, isActive: true)
+                : CropState.full(for: result.cachedImage)
+            self.cacheVersion = UUID()
+            self.updatePreview()
+            self.isLoading    = false
+            self.saveState()
         }
     }
 
