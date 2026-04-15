@@ -350,71 +350,44 @@ class ImageViewModel: ObservableObject {
 
     func applyCrop() {
         recordUndoPoint()
-        guard let base = preparedBase() else { return }
+        // Clamp the user-drawn rect against the rotated base extent before
+        // committing. preparedBase() returns a lazy CIImage — this is pure
+        // geometry, no pixel work.
+        guard let original = originalImage,
+              let base     = preparedBase() else { return }
         let clampedState = cropState.clamped(to: base.extent)
-        let imageToCache = RenderEngine.crop(clampedState.rect, to: base)
         appliedCropRect  = clampedState.rect
         isLoading = true
-        let context = ciContext
-        let config  = currentRenderConfig()
-        Task.detached {
-            let cached   = RenderEngine.renderToBuffer(imageToCache, context: context)
-            let histData = cached.flatMap { HistogramData.compute(from: $0, context: context) }
-            await MainActor.run {
-                if let config, let cached { self.renderCache.setBuffer(cached, for: config) }
-                if let config, let histData { self.renderCache.setHistogram(histData, for: config) }
-                self.cachedImage = cached
-                self.histogram   = histData
-                self.cropState   = cached.map { CropState(rect: $0.extent, isActive: true) }
-                    ?? CropState(rect: .zero, isActive: false)
-                self.cacheVersion = UUID()
-                self.updatePreview()
-                self.isLoading = false
-                self.saveState()
-            }
+
+        guard let config = currentRenderConfig() else { return }
+        Task { [pipeline] in
+            guard let result = await pipeline.render(config, from: original) else { return }
+            self.cachedImage  = result.cachedImage
+            self.histogram    = result.histogram
+            self.cropState    = CropState(rect: result.extent, isActive: true)
+            self.cacheVersion = UUID()
+            self.updatePreview()
+            self.isLoading    = false
+            self.saveState()
         }
     }
 
     func resetCrop() {
         recordUndoPoint()
-        guard let base = preparedBase() else { return }
+        guard let original = originalImage else { return }
         appliedCropRect = nil
         isLoading = true
-        let context = ciContext
-        let config  = currentRenderConfig()
 
-        // Uncropped view may already be cached (e.g. user just applied crop and now resets)
-        if let config, let cached = renderCache.buffer(for: config) {
-            Task.detached {
-                let histData = HistogramData.compute(from: cached, context: context)
-                await MainActor.run {
-                    self.cachedImage = cached
-                    self.histogram   = histData
-                    self.cropState   = CropState.full(for: cached)
-                    self.cacheVersion = UUID()
-                    self.updatePreview()
-                    self.isLoading = false
-                    self.saveState()
-                }
-            }
-            return
-        }
-
-        Task.detached {
-            let cached   = RenderEngine.renderToBuffer(base, context: context)
-            let histData = cached.flatMap { HistogramData.compute(from: $0, context: context) }
-            await MainActor.run {
-                if let config, let cached { self.renderCache.setBuffer(cached, for: config) }
-                if let config, let histData { self.renderCache.setHistogram(histData, for: config) }
-                self.cachedImage = cached
-                self.histogram   = histData
-                self.cropState   = cached.map { CropState.full(for: $0) }
-                    ?? CropState(rect: .zero, isActive: false)
-                self.cacheVersion = UUID()
-                self.updatePreview()
-                self.isLoading = false
-                self.saveState()
-            }
+        guard let config = currentRenderConfig() else { return }
+        Task { [pipeline] in
+            guard let result = await pipeline.render(config, from: original) else { return }
+            self.cachedImage  = result.cachedImage
+            self.histogram    = result.histogram
+            self.cropState    = CropState.full(for: result.cachedImage)
+            self.cacheVersion = UUID()
+            self.updatePreview()
+            self.isLoading    = false
+            self.saveState()
         }
     }
 
