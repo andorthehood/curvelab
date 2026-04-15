@@ -1,6 +1,5 @@
 import SwiftUI
 import CoreImage
-import CoreVideo
 import Combine
 import UniformTypeIdentifiers
 
@@ -11,7 +10,6 @@ class ImageViewModel: ObservableObject {
     @Published var curves = CurveModel()
     @Published var isLoading = false
     @Published var fileName = "CurveLab"
-    @Published var histogram: HistogramData?
     @Published var levelsHistogram: HistogramData?
     @Published var outputHistogram: HistogramData?
     @Published var rotationAngle: Double = 0
@@ -27,18 +25,32 @@ class ImageViewModel: ObservableObject {
     @Published private(set) var sourceURL: URL? = nil
     @Published private(set) var activeFileLiveThumbnail: CGImage? = nil
 
+    /// Latest successfully rendered output: the float32 buffer CIImage, its
+    /// histogram, and extent. Single source of truth — replaces the separate
+    /// `cachedImage` + `histogram` fields we used to carry.
+    @Published private(set) var result: RenderResult?
+
     /// Called after the user selects a new file (panel or recent-files click) but
     /// before `sourceURL` changes — ContentView uses this to save the outgoing thumbnail.
     var willLoadNewFile: (() -> Void)? = nil
 
+    // MARK: - Derived accessors (from `result`)
+
+    /// Post-cache-rebuild histogram. Observed by views for levels / curve plots.
+    var histogram: HistogramData? { result?.histogram }
+
+    /// Pixel dimensions of the most recent render, or `.zero` before any load.
     var imageSize: CGSize {
-        guard let ext = cachedImage?.extent else { return .zero }
+        guard let ext = result?.extent else { return .zero }
         return CGSize(width: ext.width, height: ext.height)
     }
 
-    var hasCachedImage: Bool { cachedImage != nil }
+    var hasCachedImage: Bool { result != nil }
 
-    private var cachedImage: CIImage?
+    /// The float32 buffer CIImage fed into LUT application and thumbnails.
+    /// Private because only this file's updatePreview / renderThumbnails read it.
+    private var cachedImage: CIImage? { result?.cachedImage }
+
     private var appliedCropRect: CGRect? = nil
 
     // Suppresses the $isNegative → rebuildCache sink during import
@@ -47,32 +59,26 @@ class ImageViewModel: ObservableObject {
 
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
-    // MARK: - Pixel-buffer cache
+    /// Serialized render pipeline. Owns the rendering CIContext, the LRU
+    /// caches (buffer / histogram / original), and a generation counter that
+    /// discards stale completions. All pixel work goes through here.
+    private lazy var pipeline = RenderPipeline(context: ciContext)
 
-    /// Caches fully-rendered float32 CVPixelBuffer CIImages.
-    /// Key encodes URL path + rotation + inversion + crop so different render
-    /// configurations of the same file get independent entries.
-    /// Capacity 3 — each entry can be 300–600 MB for a full-resolution scan.
-    private let bufferCache = LRUCache<String, CIImage>(capacity: 3)
-
-    /// Caches the lazy CIRAWFilter CIImages returned by DNGLoader.
-    /// These hold no decoded pixel data until rendered, so storing several is cheap.
-    /// They are needed so rotate / crop operations work after a buffer-cache hit.
-    private let originalCache = LRUCache<String, CIImage>(capacity: 6)
-
-    /// Caches the HistogramData for each rendered buffer so cache hits skip the
-    /// bitmap render inside HistogramData.compute entirely.
-    private let histogramCache = LRUCache<String, HistogramData>(capacity: 3)
-
-    /// Builds the cache key for the rendered float32 buffer.
-    /// Levels and curves are NOT included — they only affect the LUT, not the buffer.
-    private func bufferCacheKey(url: URL, rotation: Double,
-                                isNegative: Bool, cropRect: CGRect?) -> String {
-        let crop = cropRect.map {
-            "\($0.origin.x),\($0.origin.y),\($0.width),\($0.height)"
-        } ?? "none"
-        return "\(url.path)|\(rotation)|\(isNegative)|\(crop)"
+    /// Snapshot of the current pixel-pipeline configuration, or `nil` when no
+    /// file is loaded. `invertOverride` lets callers build a config reflecting
+    /// a value that hasn't yet been committed to `self.isNegative` — used by
+    /// the `$isNegative` sink, which fires in `willSet` before the property
+    /// has the new value.
+    private func currentRenderConfig(invertOverride: Bool? = nil) -> RenderConfig? {
+        guard let sourceURL else { return nil }
+        return RenderConfig(
+            url: sourceURL,
+            rotation: rotationAngle,
+            isNegative: invertOverride ?? isNegative,
+            cropRect: appliedCropRect
+        )
     }
+
     private var cancellables = Set<AnyCancellable>()
 
     init() {
@@ -144,100 +150,58 @@ class ImageViewModel: ObservableObject {
         let cropRect   = state?.appliedCropRect?.cgRect
         let blackPoint = state?.inputBlackPoint ?? 0.0
         let whitePoint = state?.inputWhitePoint ?? 1.0
-        let context    = ciContext
 
         suppressCacheRebuild = true
-
-        let bufKey  = bufferCacheKey(url: url, rotation: rotation,
-                                     isNegative: invertNeg, cropRect: cropRect)
-        let origKey = url.path
-
-        // ── Complete fast path: buffer + histogram both cached ──────────────
-        // Restore state synchronously on the main actor — no spinner, no task.
-        if let cachedBuf  = bufferCache.get(bufKey),
-           let cachedHist = histogramCache.get(bufKey) {
-
-            originalImage   = originalCache.get(origKey)   // nil if evicted; recovered lazily below
-            cachedImage     = cachedBuf
-            rotationAngle   = rotation
-            isNegative      = invertNeg
-            appliedCropRect = cropRect
-            histogram       = cachedHist
-            cropState       = cropRect != nil
-                ? CropState(rect: cachedBuf.extent, isActive: true)
-                : CropState.full(for: cachedBuf)
-            showCropOverlay = false
-            cropAspectRatio = nil
-            inputBlackPoint = blackPoint
-            inputWhitePoint = whitePoint
-            if let state { state.apply(to: curves) } else { curves.reset() }
-            suppressCacheRebuild = false
-            undoStack.removeAll()
-            lastSavedData = nil
-            canUndo = false
-            cacheVersion = UUID()
-            updatePreview()
-            saveState()
-
-            // Restore originalImage in background if it was evicted from cache.
-            // Needed only if the user subsequently rotates or crops.
-            if originalImage == nil {
-                Task.detached {
-                    let original = DNGLoader.load(url: url)
-                    await MainActor.run {
-                        if let original {
-                            self.originalImage = original
-                            self.originalCache.set(origKey, original)
-                        }
-                    }
-                }
-            }
-            return
-        }
-
-        // ── Slow path: full DNG decode + render ─────────────────────────────
         isLoading = true
-        Task.detached {
-            guard let decoded = DNGLoader.load(url: url) else {
-                await MainActor.run { self.isLoading = false; self.suppressCacheRebuild = false }
+
+        let config = RenderConfig(url: url, rotation: rotation,
+                                  isNegative: invertNeg, cropRect: cropRect)
+
+        Task { [pipeline] in
+            // 1. Resolve the decoded original — cached or via DNGLoader.
+            let original: CIImage
+            if let cached = await pipeline.original(for: url) {
+                original = cached
+            } else {
+                guard let decoded = await Task.detached(priority: .userInitiated, operation: {
+                    DNGLoader.load(url: url)
+                }).value else {
+                    self.isLoading = false
+                    self.suppressCacheRebuild = false
+                    return
+                }
+                await pipeline.setOriginal(decoded, for: url)
+                original = decoded
+            }
+
+            // 2. Render (may hit cache for recently-viewed configurations).
+            //    Returns nil if a newer loadFile or rebuildCache superseded us.
+            guard let result = await pipeline.render(config, from: original) else {
                 return
             }
 
-            let base         = Self.buildBase(from: decoded, rotation: rotation, invert: invertNeg)
-            let imageToCache = Self.applyCrop(cropRect, to: base)
-            let cached       = Self.renderToBuffer(imageToCache, context: context)
-            let histData     = cached.flatMap { HistogramData.compute(from: $0, context: context) }
-
-            await MainActor.run {
-                if let cached   { self.bufferCache.set(bufKey, cached) }
-                if let histData { self.histogramCache.set(bufKey, histData) }
-                self.originalCache.set(origKey, decoded)
-
-                self.originalImage   = decoded
-                self.cachedImage     = cached
-                self.rotationAngle   = rotation
-                self.isNegative      = invertNeg
-                self.appliedCropRect = cropRect
-                self.histogram       = histData
-                self.cropState       = cached.map {
-                    cropRect != nil
-                        ? CropState(rect: $0.extent, isActive: true)
-                        : CropState.full(for: $0)
-                } ?? CropState(rect: .zero, isActive: false)
-                self.showCropOverlay = false
-                self.cropAspectRatio = nil
-                self.inputBlackPoint = blackPoint
-                self.inputWhitePoint = whitePoint
-                if let state { state.apply(to: self.curves) } else { self.curves.reset() }
-                self.suppressCacheRebuild = false
-                self.undoStack.removeAll()
-                self.lastSavedData = nil
-                self.canUndo = false
-                self.cacheVersion = UUID()
-                self.updatePreview()
-                self.isLoading = false
-                self.saveState()
-            }
+            // 3. Commit all state on MainActor (Task inherits MainActor from self).
+            self.originalImage   = original
+            self.result          = result
+            self.rotationAngle   = rotation
+            self.isNegative      = invertNeg
+            self.appliedCropRect = cropRect
+            self.cropState       = cropRect != nil
+                ? CropState(rect: result.extent, isActive: true)
+                : CropState.full(for: result.cachedImage)
+            self.showCropOverlay = false
+            self.cropAspectRatio = nil
+            self.inputBlackPoint = blackPoint
+            self.inputWhitePoint = whitePoint
+            if let state { state.apply(to: self.curves) } else { self.curves.reset() }
+            self.suppressCacheRebuild = false
+            self.undoStack.removeAll()
+            self.lastSavedData = nil
+            self.canUndo = false
+            self.cacheVersion = UUID()
+            self.updatePreview()
+            self.isLoading = false
+            self.saveState()
         }
     }
 
@@ -315,58 +279,32 @@ class ImageViewModel: ObservableObject {
     /// Returns originalImage with rotation + optional inversion applied (no crop).
     private func preparedBase(invert: Bool? = nil) -> CIImage? {
         guard let originalImage else { return nil }
-        return Self.buildBase(from: originalImage, rotation: rotationAngle,
+        return RenderEngine.buildBase(from: originalImage, rotation: rotationAngle,
                               invert: invert ?? isNegative)
     }
 
     private func rebuildCache(invert: Bool? = nil) {
-        guard let base = preparedBase(invert: invert) else { return }
+        guard let original = originalImage,
+              let config   = currentRenderConfig(invertOverride: invert) else { return }
         isLoading = true
+        let hasCrop = config.cropRect != nil
 
-        let effectiveInvert = invert ?? isNegative
-        let imageToCache = Self.applyCrop(appliedCropRect, to: base)
-        let hasCrop  = appliedCropRect != nil
-        let context  = ciContext
-        let bufKey   = sourceURL.map {
-            bufferCacheKey(url: $0, rotation: rotationAngle,
-                           isNegative: effectiveInvert, cropRect: appliedCropRect)
-        }
-
-        // Fast path: this exact configuration is already cached
-        if let key = bufKey, let cached = bufferCache.get(key) {
-            Task.detached {
-                let histData = HistogramData.compute(from: cached, context: context)
-                await MainActor.run {
-                    self.cachedImage = cached
-                    self.histogram   = histData
-                    self.cropState   = hasCrop
-                        ? CropState(rect: cached.extent, isActive: true)
-                        : CropState.full(for: cached)
-                    self.cacheVersion = UUID()
-                    self.updatePreview()
-                    self.isLoading = false
-                    self.saveState()
-                }
+        Task { [pipeline] in
+            guard let result = await pipeline.render(config, from: original) else {
+                // Superseded by a newer render, or render failed. Don't
+                // mutate UI state — the newer render (if any) will own the
+                // next update. isLoading is intentionally left set; the final
+                // completing render will clear it.
+                return
             }
-            return
-        }
-
-        Task.detached {
-            let cached   = Self.renderToBuffer(imageToCache, context: context)
-            let histData = cached.flatMap { HistogramData.compute(from: $0, context: context) }
-            await MainActor.run {
-                if let bufKey, let cached { self.bufferCache.set(bufKey, cached) }
-                if let bufKey, let histData { self.histogramCache.set(bufKey, histData) }
-                self.cachedImage = cached
-                self.histogram   = histData
-                self.cropState   = cached.map {
-                    hasCrop ? CropState(rect: $0.extent, isActive: true) : CropState.full(for: $0)
-                } ?? CropState(rect: .zero, isActive: false)
-                self.cacheVersion = UUID()
-                self.updatePreview()
-                self.isLoading = false
-                self.saveState()
-            }
+            self.result       = result
+            self.cropState    = hasCrop
+                ? CropState(rect: result.extent, isActive: true)
+                : CropState.full(for: result.cachedImage)
+            self.cacheVersion = UUID()
+            self.updatePreview()
+            self.isLoading    = false
+            self.saveState()
         }
     }
 
@@ -374,77 +312,42 @@ class ImageViewModel: ObservableObject {
 
     func applyCrop() {
         recordUndoPoint()
-        guard let base = preparedBase() else { return }
+        // Clamp the user-drawn rect against the rotated base extent before
+        // committing. preparedBase() returns a lazy CIImage — this is pure
+        // geometry, no pixel work.
+        guard let original = originalImage,
+              let base     = preparedBase() else { return }
         let clampedState = cropState.clamped(to: base.extent)
-        let imageToCache = Self.applyCrop(clampedState.rect, to: base)
         appliedCropRect  = clampedState.rect
         isLoading = true
-        let context = ciContext
-        let bufKey  = sourceURL.map {
-            bufferCacheKey(url: $0, rotation: rotationAngle,
-                           isNegative: isNegative, cropRect: appliedCropRect)
-        }
-        Task.detached {
-            let cached   = Self.renderToBuffer(imageToCache, context: context)
-            let histData = cached.flatMap { HistogramData.compute(from: $0, context: context) }
-            await MainActor.run {
-                if let bufKey, let cached { self.bufferCache.set(bufKey, cached) }
-                if let bufKey, let histData { self.histogramCache.set(bufKey, histData) }
-                self.cachedImage = cached
-                self.histogram   = histData
-                self.cropState   = cached.map { CropState(rect: $0.extent, isActive: true) }
-                    ?? CropState(rect: .zero, isActive: false)
-                self.cacheVersion = UUID()
-                self.updatePreview()
-                self.isLoading = false
-                self.saveState()
-            }
+
+        guard let config = currentRenderConfig() else { return }
+        Task { [pipeline] in
+            guard let result = await pipeline.render(config, from: original) else { return }
+            self.result       = result
+            self.cropState    = CropState(rect: result.extent, isActive: true)
+            self.cacheVersion = UUID()
+            self.updatePreview()
+            self.isLoading    = false
+            self.saveState()
         }
     }
 
     func resetCrop() {
         recordUndoPoint()
-        guard let base = preparedBase() else { return }
+        guard let original = originalImage else { return }
         appliedCropRect = nil
         isLoading = true
-        let context = ciContext
-        let bufKey  = sourceURL.map {
-            bufferCacheKey(url: $0, rotation: rotationAngle,
-                           isNegative: isNegative, cropRect: nil)
-        }
 
-        // Uncropped view may already be cached (e.g. user just applied crop and now resets)
-        if let key = bufKey, let cached = bufferCache.get(key) {
-            Task.detached {
-                let histData = HistogramData.compute(from: cached, context: context)
-                await MainActor.run {
-                    self.cachedImage = cached
-                    self.histogram   = histData
-                    self.cropState   = CropState.full(for: cached)
-                    self.cacheVersion = UUID()
-                    self.updatePreview()
-                    self.isLoading = false
-                    self.saveState()
-                }
-            }
-            return
-        }
-
-        Task.detached {
-            let cached   = Self.renderToBuffer(base, context: context)
-            let histData = cached.flatMap { HistogramData.compute(from: $0, context: context) }
-            await MainActor.run {
-                if let bufKey, let cached { self.bufferCache.set(bufKey, cached) }
-                if let bufKey, let histData { self.histogramCache.set(bufKey, histData) }
-                self.cachedImage = cached
-                self.histogram   = histData
-                self.cropState   = cached.map { CropState.full(for: $0) }
-                    ?? CropState(rect: .zero, isActive: false)
-                self.cacheVersion = UUID()
-                self.updatePreview()
-                self.isLoading = false
-                self.saveState()
-            }
+        guard let config = currentRenderConfig() else { return }
+        Task { [pipeline] in
+            guard let result = await pipeline.render(config, from: original) else { return }
+            self.result       = result
+            self.cropState    = CropState.full(for: result.cachedImage)
+            self.cacheVersion = UUID()
+            self.updatePreview()
+            self.isLoading    = false
+            self.saveState()
         }
     }
 
@@ -721,65 +624,4 @@ class ImageViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Static helpers (nonisolated — safe to call from Task.detached)
-
-    private nonisolated static func buildBase(from image: CIImage,
-                                              rotation: Double,
-                                              invert: Bool) -> CIImage {
-        let rotated = rotatedImage(image, angle: rotation)
-        return invert ? rotated.applyingFilter("CIColorInvert") : rotated
-    }
-
-    private nonisolated static func rotatedImage(_ image: CIImage, angle: Double) -> CIImage {
-        guard angle != 0 else { return image }
-        let radians = angle * .pi / 180
-        let extent  = image.extent
-        let cx = extent.midX, cy = extent.midY
-        let rotated = image
-            .transformed(by: CGAffineTransform(translationX: -cx, y: -cy))
-            .transformed(by: CGAffineTransform(rotationAngle: CGFloat(radians)))
-            .transformed(by: CGAffineTransform(translationX: cx, y: cy))
-        let ne = rotated.extent
-        return rotated.transformed(by: CGAffineTransform(translationX: -ne.minX, y: -ne.minY))
-    }
-
-    /// Crops and normalises origin if rect is provided; returns image unchanged otherwise.
-    private nonisolated static func applyCrop(_ rect: CGRect?, to image: CIImage) -> CIImage {
-        guard let rect, rect.width >= CropState.minimumSize,
-              rect.height >= CropState.minimumSize else { return image }
-        let cropped = image.cropped(to: rect)
-        return cropped.transformed(by: CGAffineTransform(
-            translationX: -cropped.extent.minX,
-            y: -cropped.extent.minY
-        ))
-    }
-
-    private nonisolated static func renderToBuffer(_ image: CIImage,
-                                                   context: CIContext) -> CIImage? {
-        let extent = image.extent
-        guard extent.width > 0, extent.height > 0 else { return nil }
-        let width = Int(extent.width), height = Int(extent.height)
-
-        var buffer: CVPixelBuffer?
-        let attrs: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_128RGBAFloat,
-            kCVPixelBufferWidthKey: width,
-            kCVPixelBufferHeightKey: height,
-            kCVPixelBufferIOSurfacePropertiesKey: [:] as [CFString: Any]
-        ]
-        guard CVPixelBufferCreate(kCFAllocatorDefault, width, height,
-                                  kCVPixelFormatType_128RGBAFloat,
-                                  attrs as CFDictionary, &buffer) == kCVReturnSuccess,
-              let buffer else { return nil }
-
-        context.render(image, to: buffer,
-                       bounds: CGRect(x: 0, y: 0, width: width, height: height),
-                       colorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB))
-        return CIImage(cvPixelBuffer: buffer)
-    }
-
-    // Instance wrapper used by preparedBase (reads self.rotationAngle)
-    private func rotateImage(_ image: CIImage) -> CIImage {
-        Self.rotatedImage(image, angle: rotationAngle)
-    }
 }
