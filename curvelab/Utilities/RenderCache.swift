@@ -12,8 +12,8 @@ import Foundation
 /// Capacities match the historical tuning (one buffer entry can be 300–600 MB
 /// at full resolution; originals are lazy and cheap).
 ///
-/// Not thread-safe. `ImageViewModel` currently drives this from `@MainActor`;
-/// a future `RenderPipeline` actor will own it instead.
+/// Not thread-safe on its own — serialised by the `RenderPipeline` actor
+/// that owns it. All access goes through the actor.
 final class RenderCache {
     private let buffer    = LRUCache<String, CIImage>(capacity: 3)
     private let histogram = LRUCache<String, HistogramData>(capacity: 3)

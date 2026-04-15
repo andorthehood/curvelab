@@ -10,11 +10,10 @@ import Foundation
 /// if a newer render has started in the meantime, this one returns `nil` and
 /// its result is discarded.
 ///
-/// During the incremental migration described in `docs/todos/20`, this actor
-/// owns its own `RenderCache`, disjoint from the cache still on
-/// `ImageViewModel`. That means rotate↔crop etc. don't yet share cache hits,
-/// but each isolation boundary is internally consistent. The caches merge
-/// when `loadFile` migrates in Step 6.
+/// Sole owner of the `RenderCache` feeding the pipeline. The view model
+/// holds no pixel caches of its own — it drives this actor with
+/// `RenderConfig` snapshots and stores the returned `RenderResult` whole.
+/// See `docs/pipeline-architecture.md` for the full picture.
 actor RenderPipeline {
     private let cache = RenderCache()
     private let context: CIContext

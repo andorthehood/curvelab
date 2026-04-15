@@ -7,8 +7,7 @@ import CoreVideo
 /// a fully-rendered float32 buffer the UI can display. All methods are pure
 /// (no `@MainActor`, no SwiftUI) and safe to call from `Task.detached`.
 ///
-/// Ownership: a future `RenderPipeline` actor will call these; for now
-/// `ImageViewModel` invokes them directly.
+/// Called exclusively by `RenderPipeline` from its off-actor detached task.
 enum RenderEngine {
 
     // MARK: - Geometry
