@@ -7,6 +7,7 @@ struct ContentView: View {
 
     @State private var sidebarWidth: CGFloat = 320
     @State private var excludeClipEnds: Bool = false
+    @State private var showingExportDialog = false
 
     private let minSidebarWidth:    CGFloat = 260
     private let minImageWidth:      CGFloat = 280
@@ -231,9 +232,9 @@ struct ContentView: View {
                 }
 
                 Button {
-                    viewModel.exportJPG()
+                    showingExportDialog = true
                 } label: {
-                    Label("Export JPG", systemImage: "square.and.arrow.up")
+                    Label("Export", systemImage: "square.and.arrow.up")
                 }
                 .disabled(viewModel.previewImage == nil)
 
@@ -290,6 +291,34 @@ struct ContentView: View {
                 recentFilesStore.saveThumbnail(cg, for: entry.id)
             }
         }
+        .sheet(isPresented: $showingExportDialog) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Export")
+                    .font(.headline)
+
+                Button("Export JPG") {
+                    showingExportDialog = false
+                    exportJPG()
+                }
+                .disabled(viewModel.previewImage == nil)
+
+                Button("Export TIFF 16-bit (No Edits)") {
+                    showingExportDialog = false
+                    export16BitTIFF()
+                }
+                .disabled(viewModel.originalImage == nil)
+
+                HStack {
+                    Spacer()
+                    Button("Close") {
+                        showingExportDialog = false
+                    }
+                    .keyboardShortcut(.cancelAction)
+                }
+            }
+            .padding(20)
+            .frame(width: 420)
+        }
     }
 
     // MARK: - Helpers
@@ -298,6 +327,50 @@ struct ContentView: View {
     private func hist(_ h: HistogramData?) -> HistogramData? {
         guard let h else { return nil }
         return excludeClipEnds ? h.withClipEndsExcluded : h
+    }
+
+    private func exportJPG() {
+        guard let previewImage = viewModel.previewImage else { return }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.jpeg]
+        panel.nameFieldStringValue = "\(viewModel.fileName)_edited.jpg"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        viewModel.isLoading = true
+        let linear = viewModel.exportLinear
+        Task.detached {
+            ExportPipeline.writeJPEG(previewImage: previewImage, linear: linear, to: url)
+            await MainActor.run {
+                viewModel.isLoading = false
+            }
+        }
+    }
+
+    private func export16BitTIFF() {
+        guard let originalImage = viewModel.originalImage else { return }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.tiff]
+        panel.nameFieldStringValue = "\(viewModel.fileName)_inverted.tiff"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        viewModel.isLoading = true
+        let rotation = viewModel.rotationAngle
+        let cropRect = viewModel.exportCropRect
+        Task.detached {
+            let imageToExport = ExportPipeline.makeUneditedExportImage(
+                from: originalImage,
+                rotation: rotation,
+                cropRect: cropRect
+            )
+            if let master = ExportPipeline.makeIntegerMaster(from: imageToExport) {
+                ExportPipeline.write16BitTIFF(master: master, to: url)
+            }
+            await MainActor.run {
+                viewModel.isLoading = false
+            }
+        }
     }
 }
 

@@ -46,6 +46,7 @@ class ImageViewModel: ObservableObject {
     }
 
     var hasCachedImage: Bool { result != nil }
+    var exportCropRect: CGRect? { appliedCropRect }
 
     /// The float32 buffer CIImage fed into LUT application and thumbnails.
     /// Private because only this file's updatePreview / renderThumbnails read it.
@@ -484,47 +485,6 @@ class ImageViewModel: ObservableObject {
                 }
             }
             await MainActor.run { self.presetThumbnails = results }
-        }
-    }
-
-    // MARK: - Export
-
-    func exportJPG() {
-        guard let previewImage else { return }
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.jpeg]
-        panel.nameFieldStringValue = "\(fileName)_edited.jpg"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-
-        isLoading = true
-        let imageToExport = previewImage
-        let linear = exportLinear
-        Task.detached {
-            // Use a context with linearSRGB working space — same as the SDR Metal preview
-            // context — so the untagged float32 buffer values are interpreted as linear
-            // and gamma-encoded correctly when writing to sRGB.
-            let exportContext = CIContext(options: [
-                .useSoftwareRenderer: false,
-                .workingColorSpace: CGColorSpace(name: CGColorSpace.linearSRGB)!
-            ])
-            let outputColorSpace = CGColorSpace(name: linear
-                ? CGColorSpace.linearSRGB
-                : CGColorSpace.sRGB)!
-            guard let cgImage = exportContext.createCGImage(
-                imageToExport,
-                from: imageToExport.extent,
-                format: .RGBA8,
-                colorSpace: outputColorSpace
-            ) else {
-                await MainActor.run { self.isLoading = false }
-                return
-            }
-            if let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) {
-                CGImageDestinationAddImage(dest, cgImage,
-                    [kCGImageDestinationLossyCompressionQuality: 0.92] as CFDictionary)
-                CGImageDestinationFinalize(dest)
-            }
-            await MainActor.run { self.isLoading = false }
         }
     }
 
