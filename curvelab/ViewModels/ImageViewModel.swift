@@ -81,13 +81,6 @@ class ImageViewModel: ObservableObject {
             .sink { [weak self] _ in self?.updatePreview() }
             .store(in: &cancellables)
 
-        // Record undo point quickly after curve edits settle (100 ms — well under the
-        // 500 ms sidecar write, so undo is available almost immediately after a change).
-        curves.objectWillChange
-            .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
-            .sink { [weak self] _ in self?.recordUndoPoint() }
-            .store(in: &cancellables)
-
         // Auto-save after curve edits settle
         curves.objectWillChange
             .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
@@ -107,13 +100,6 @@ class ImageViewModel: ObservableObject {
             .dropFirst()
             .debounce(for: .milliseconds(16), scheduler: RunLoop.main)
             .sink { [weak self] _ in self?.updatePreview() }
-            .store(in: &cancellables)
-
-        // Record undo point quickly after levels settle
-        Publishers.CombineLatest($inputBlackPoint, $inputWhitePoint)
-            .dropFirst()
-            .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
-            .sink { [weak self] _ in self?.recordUndoPoint() }
             .store(in: &cancellables)
 
         // Auto-save after levels settle
