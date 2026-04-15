@@ -91,6 +91,9 @@ class ImageViewModel: ObservableObject {
             .dropFirst()
             .sink { [weak self] invert in
                 guard let self, !self.suppressCacheRebuild else { return }
+                // @Published fires in willSet — self.isNegative is still the OLD value here,
+                // so recordUndoPoint captures the correct pre-toggle state.
+                self.recordUndoPoint()
                 self.rebuildCache(invert: invert)
             }
             .store(in: &cancellables)
@@ -633,9 +636,9 @@ class ImageViewModel: ObservableObject {
     /// Captures the current editing state and, if it has changed since the last
     /// recorded point, pushes the previous snapshot onto the undo stack.
     /// Does NOT write to disk — use `saveState()` for persistence.
-    /// Called from 100 ms debounced sinks (continuous edits) and directly
-    /// before every one-shot mutation (rotate, crop, reset, preset apply, absorbBP).
-    private func recordUndoPoint() {
+    /// Called at the start of every drag gesture (via `onDragBegan` view callbacks)
+    /// and directly before every one-shot mutation (rotate, crop, reset, preset apply, absorbBP).
+    func recordUndoPoint() {
         guard sourceURL != nil else { return }
         let state = EditingState(
             rotation: rotationAngle,
@@ -711,13 +714,6 @@ class ImageViewModel: ObservableObject {
             curves: curves
         )
         guard let data = try? JSONEncoder().encode(state) else { return }
-
-        // Only push to undo stack if the state actually changed.
-        if let previous = lastSavedData, previous != data {
-            undoStack.append(previous)
-            if undoStack.count > maxUndoSteps { undoStack.removeFirst() }
-            canUndo = true
-        }
         lastSavedData = data
 
         do {

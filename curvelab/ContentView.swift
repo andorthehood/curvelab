@@ -149,7 +149,8 @@ struct ContentView: View {
                             whitePoint: $viewModel.inputWhitePoint,
                             histogram: hist(viewModel.histogram),
                             onLinkedBlackPointChanged: { viewModel.setBlackPointWithCurves($0) },
-                            linkedBlackPointMax: viewModel.linkedBlackPointMax
+                            linkedBlackPointMax: viewModel.linkedBlackPointMax,
+                            onDragBegan: { viewModel.recordUndoPoint() }
                         )
                         .disabled(!hasImage)
 
@@ -178,7 +179,8 @@ struct ContentView: View {
 
                         CurveEditorView(
                             curves: viewModel.curves,
-                            histogram: hist(viewModel.levelsHistogram ?? viewModel.histogram)
+                            histogram: hist(viewModel.levelsHistogram ?? viewModel.histogram),
+                            onDragBegan: { viewModel.recordUndoPoint() }
                         )
                         .frame(maxWidth: .infinity)
 

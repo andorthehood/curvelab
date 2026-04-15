@@ -3,6 +3,9 @@ import SwiftUI
 struct CurveEditorView: View {
     @ObservedObject var curves: CurveModel
     var histogram: HistogramData?
+    /// Called once at the very start of any drag gesture or double-click so the
+    /// caller can capture an undo snapshot before the first change lands.
+    var onDragBegan: (() -> Void)? = nil
     @State private var draggingPointID: UUID?
     /// Captures each point's X at the moment an all-points strip drag begins.
     @State private var shiftStartXs: [UUID: Double]?
@@ -264,6 +267,7 @@ struct CurveEditorView: View {
     private func onStripDrag(value: DragGesture.Value, width: CGFloat) {
         guard width > 0 else { return }
         if shiftStartXs == nil {
+            onDragBegan?()
             shiftStartXs = Dictionary(
                 uniqueKeysWithValues: curves.activeCurve.points.map { ($0.id, $0.x) }
             )
@@ -285,6 +289,7 @@ struct CurveEditorView: View {
         if topHalf { captured = topStartXs } else { captured = bottomStartXs }
 
         if captured == nil {
+            onDragBegan?()
             let snap = Dictionary(
                 uniqueKeysWithValues: curves.activeCurve.points
                     .filter { topHalf ? $0.y >= 0.5 : $0.y < 0.5 }
@@ -321,11 +326,13 @@ struct CurveEditorView: View {
             }
 
             if let id = bestID {
+                onDragBegan?()
                 draggingPointID = id
             } else {
                 // No existing point nearby — add a new one on the curve and start dragging it
                 let startNorm = screenToNormalized(value.startLocation, size: size, origin: origin)
                 if startNorm.x > 0.01 && startNorm.x < 0.99 {
+                    onDragBegan?()
                     curves.activeCurve.addPoint(at: startNorm.x)
                     let sorted = curves.activeCurve.sortedPoints
                     if let newPoint = sorted.min(by: { abs($0.x - startNorm.x) < abs($1.x - startNorm.x) }) {
@@ -341,6 +348,7 @@ struct CurveEditorView: View {
     }
 
     private func onDoubleClick(location: CGPoint, size: CGFloat, origin: CGPoint) {
+        onDragBegan?()
         let rect = CGRect(origin: origin, size: CGSize(width: size, height: size))
         if let id = nearestPoint(to: location, in: rect) {
             curves.activeCurve.removePoint(id: id)

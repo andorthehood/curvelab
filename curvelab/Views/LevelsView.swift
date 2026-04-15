@@ -18,6 +18,8 @@ struct LevelsView: View {
     var onLinkedBlackPointChanged: ((Double) -> Void)? = nil
     /// Hard cap for the linked handle — dragging past this would crush the curve's leftmost point.
     var linkedBlackPointMax: Double = 1.0
+    /// Called once at the start of any drag so the caller can capture an undo snapshot.
+    var onDragBegan: (() -> Void)? = nil
 
     /// Minimum gap between handles (in normalised units)
     private let minimumSpan: Double = 0.01
@@ -208,6 +210,7 @@ struct LevelsView: View {
     private func onRangeDrag(value: DragGesture.Value, width: CGFloat) {
         guard width > 0 else { return }
         if rangeStartBP == nil {
+            onDragBegan?()
             rangeStartBP = blackPoint
             rangeStartWP = whitePoint
         }
@@ -243,6 +246,7 @@ struct LevelsView: View {
                 }
             }
             guard dragging != nil else { return }
+            onDragBegan?()
         }
 
         let normalised = max(0, min(1, Double(value.location.x / width)))
