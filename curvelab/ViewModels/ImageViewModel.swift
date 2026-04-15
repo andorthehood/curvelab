@@ -64,15 +64,21 @@ class ImageViewModel: ObservableObject {
     /// bitmap render inside HistogramData.compute entirely.
     private let histogramCache = LRUCache<String, HistogramData>(capacity: 3)
 
-    /// Builds the cache key for the rendered float32 buffer.
-    /// Levels and curves are NOT included — they only affect the LUT, not the buffer.
-    private func bufferCacheKey(url: URL, rotation: Double,
-                                isNegative: Bool, cropRect: CGRect?) -> String {
-        let crop = cropRect.map {
-            "\($0.origin.x),\($0.origin.y),\($0.width),\($0.height)"
-        } ?? "none"
-        return "\(url.path)|\(rotation)|\(isNegative)|\(crop)"
+    /// Snapshot of the current pixel-pipeline configuration, or `nil` when no
+    /// file is loaded. `invertOverride` lets callers build a config reflecting
+    /// a value that hasn't yet been committed to `self.isNegative` — used by
+    /// the `$isNegative` sink, which fires in `willSet` before the property
+    /// has the new value.
+    private func currentRenderConfig(invertOverride: Bool? = nil) -> RenderConfig? {
+        guard let sourceURL else { return nil }
+        return RenderConfig(
+            url: sourceURL,
+            rotation: rotationAngle,
+            isNegative: invertOverride ?? isNegative,
+            cropRect: appliedCropRect
+        )
     }
+
     private var cancellables = Set<AnyCancellable>()
 
     init() {
@@ -148,8 +154,8 @@ class ImageViewModel: ObservableObject {
 
         suppressCacheRebuild = true
 
-        let bufKey  = bufferCacheKey(url: url, rotation: rotation,
-                                     isNegative: invertNeg, cropRect: cropRect)
+        let bufKey  = RenderConfig(url: url, rotation: rotation,
+                                   isNegative: invertNeg, cropRect: cropRect).cacheKey
         let origKey = url.path
 
         // ── Complete fast path: buffer + histogram both cached ──────────────
@@ -323,14 +329,10 @@ class ImageViewModel: ObservableObject {
         guard let base = preparedBase(invert: invert) else { return }
         isLoading = true
 
-        let effectiveInvert = invert ?? isNegative
         let imageToCache = Self.applyCrop(appliedCropRect, to: base)
         let hasCrop  = appliedCropRect != nil
         let context  = ciContext
-        let bufKey   = sourceURL.map {
-            bufferCacheKey(url: $0, rotation: rotationAngle,
-                           isNegative: effectiveInvert, cropRect: appliedCropRect)
-        }
+        let bufKey   = currentRenderConfig(invertOverride: invert)?.cacheKey
 
         // Fast path: this exact configuration is already cached
         if let key = bufKey, let cached = bufferCache.get(key) {
@@ -380,10 +382,7 @@ class ImageViewModel: ObservableObject {
         appliedCropRect  = clampedState.rect
         isLoading = true
         let context = ciContext
-        let bufKey  = sourceURL.map {
-            bufferCacheKey(url: $0, rotation: rotationAngle,
-                           isNegative: isNegative, cropRect: appliedCropRect)
-        }
+        let bufKey  = currentRenderConfig()?.cacheKey
         Task.detached {
             let cached   = Self.renderToBuffer(imageToCache, context: context)
             let histData = cached.flatMap { HistogramData.compute(from: $0, context: context) }
@@ -408,10 +407,7 @@ class ImageViewModel: ObservableObject {
         appliedCropRect = nil
         isLoading = true
         let context = ciContext
-        let bufKey  = sourceURL.map {
-            bufferCacheKey(url: $0, rotation: rotationAngle,
-                           isNegative: isNegative, cropRect: nil)
-        }
+        let bufKey  = currentRenderConfig()?.cacheKey
 
         // Uncropped view may already be cached (e.g. user just applied crop and now resets)
         if let key = bufKey, let cached = bufferCache.get(key) {
