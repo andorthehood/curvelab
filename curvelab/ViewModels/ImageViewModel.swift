@@ -81,6 +81,13 @@ class ImageViewModel: ObservableObject {
             .sink { [weak self] _ in self?.updatePreview() }
             .store(in: &cancellables)
 
+        // Record undo point quickly after curve edits settle (100 ms — well under the
+        // 500 ms sidecar write, so undo is available almost immediately after a change).
+        curves.objectWillChange
+            .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
+            .sink { [weak self] _ in self?.recordUndoPoint() }
+            .store(in: &cancellables)
+
         // Auto-save after curve edits settle
         curves.objectWillChange
             .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
@@ -100,6 +107,13 @@ class ImageViewModel: ObservableObject {
             .dropFirst()
             .debounce(for: .milliseconds(16), scheduler: RunLoop.main)
             .sink { [weak self] _ in self?.updatePreview() }
+            .store(in: &cancellables)
+
+        // Record undo point quickly after levels settle
+        Publishers.CombineLatest($inputBlackPoint, $inputWhitePoint)
+            .dropFirst()
+            .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
+            .sink { [weak self] _ in self?.recordUndoPoint() }
             .store(in: &cancellables)
 
         // Auto-save after levels settle
@@ -293,6 +307,7 @@ class ImageViewModel: ObservableObject {
     // MARK: - Rotation
 
     func rotateLeft() {
+        recordUndoPoint()
         rotationAngle = (rotationAngle - 90).truncatingRemainder(dividingBy: 360)
         if rotationAngle < 0 { rotationAngle += 360 }
         appliedCropRect = nil
@@ -300,6 +315,7 @@ class ImageViewModel: ObservableObject {
     }
 
     func rotateRight() {
+        recordUndoPoint()
         rotationAngle = (rotationAngle + 90).truncatingRemainder(dividingBy: 360)
         appliedCropRect = nil
         rebuildCache()
@@ -368,6 +384,7 @@ class ImageViewModel: ObservableObject {
     // MARK: - Crop
 
     func applyCrop() {
+        recordUndoPoint()
         guard let base = preparedBase() else { return }
         let clampedState = cropState.clamped(to: base.extent)
         let imageToCache = Self.applyCrop(clampedState.rect, to: base)
@@ -397,6 +414,7 @@ class ImageViewModel: ObservableObject {
     }
 
     func resetCrop() {
+        recordUndoPoint()
         guard let base = preparedBase() else { return }
         appliedCropRect = nil
         isLoading = true
@@ -459,6 +477,7 @@ class ImageViewModel: ObservableObject {
     /// Absorbs the active channel's black-point shift into the input levels black point,
     /// then stretches the appropriate curves back to fill [0, 1]. Output is mathematically unchanged.
     func absorbCurveBlackPoint() {
+        recordUndoPoint()
         let x0 = curves.activeCurve.sortedPoints.first?.x ?? 0
         guard x0 > 0 else { return }
 
@@ -501,6 +520,7 @@ class ImageViewModel: ObservableObject {
     }
 
     func resetCurves() {
+        recordUndoPoint()
         curves.reset()
         inputBlackPoint = 0.0
         inputWhitePoint = 1.0
@@ -520,6 +540,7 @@ class ImageViewModel: ObservableObject {
     }
 
     func applyPreset(_ preset: Preset) {
+        recordUndoPoint()
         isNegative      = preset.isNegative
         inputBlackPoint = preset.inputBlackPoint
         inputWhitePoint = preset.inputWhitePoint
@@ -622,6 +643,31 @@ class ImageViewModel: ObservableObject {
     private var lastSavedData: Data? = nil
     private let maxUndoSteps = 50
     @Published private(set) var canUndo = false
+
+    /// Captures the current editing state and, if it has changed since the last
+    /// recorded point, pushes the previous snapshot onto the undo stack.
+    /// Does NOT write to disk — use `saveState()` for persistence.
+    /// Called from 100 ms debounced sinks (continuous edits) and directly
+    /// before every one-shot mutation (rotate, crop, reset, preset apply, absorbBP).
+    private func recordUndoPoint() {
+        guard sourceURL != nil else { return }
+        let state = EditingState(
+            rotation: rotationAngle,
+            isNegative: isNegative,
+            appliedCropRect: appliedCropRect,
+            inputBlackPoint: inputBlackPoint,
+            inputWhitePoint: inputWhitePoint,
+            curves: curves
+        )
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        guard data != lastSavedData else { return }   // nothing changed — skip
+        if let previous = lastSavedData {
+            undoStack.append(previous)
+            if undoStack.count > maxUndoSteps { undoStack.removeFirst() }
+            canUndo = true
+        }
+        lastSavedData = data
+    }
 
     func undo() {
         guard let prevData = undoStack.popLast(),
