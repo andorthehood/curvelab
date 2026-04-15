@@ -169,6 +169,9 @@ class ImageViewModel: ObservableObject {
             inputWhitePoint = whitePoint
             if let state { state.apply(to: curves) } else { curves.reset() }
             suppressCacheRebuild = false
+            undoStack.removeAll()
+            lastSavedData = nil
+            canUndo = false
             cacheVersion = UUID()
             updatePreview()
             saveState()
@@ -224,6 +227,9 @@ class ImageViewModel: ObservableObject {
                 self.inputWhitePoint = whitePoint
                 if let state { state.apply(to: self.curves) } else { self.curves.reset() }
                 self.suppressCacheRebuild = false
+                self.undoStack.removeAll()
+                self.lastSavedData = nil
+                self.canUndo = false
                 self.cacheVersion = UUID()
                 self.updatePreview()
                 self.isLoading = false
@@ -608,6 +614,55 @@ class ImageViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Undo
+
+    /// JSON snapshots of previous editing states, oldest first.
+    /// Stored as Data so byte equality handles deduplication without needing Equatable.
+    private var undoStack: [Data] = []
+    private var lastSavedData: Data? = nil
+    private let maxUndoSteps = 50
+    @Published private(set) var canUndo = false
+
+    func undo() {
+        guard let prevData = undoStack.popLast(),
+              let prevState = try? JSONDecoder().decode(EditingState.self, from: prevData)
+        else { return }
+        canUndo = !undoStack.isEmpty
+        // Update lastSavedData to the state we're restoring so the next debounced
+        // saveState() sees no change and doesn't re-push it onto the stack.
+        lastSavedData = prevData
+        applyEditingState(prevState)
+        // Write restored state to sidecar immediately.
+        guard let url = sourceURL else { return }
+        try? prevData.write(to: url.curvelabSidecar)
+    }
+
+    /// Applies a previously saved EditingState, rebuilding the pixel buffer only when
+    /// rotation, inversion, or crop changed (levels/curves only need a preview update).
+    private func applyEditingState(_ state: EditingState) {
+        let prevRotation  = rotationAngle
+        let prevNegative  = isNegative
+        let prevCropRect  = appliedCropRect
+
+        suppressCacheRebuild = true
+        rotationAngle   = state.rotation
+        isNegative      = state.isNegative
+        appliedCropRect = state.appliedCropRect?.cgRect
+        inputBlackPoint = state.inputBlackPoint
+        inputWhitePoint = state.inputWhitePoint
+        state.apply(to: curves)
+        suppressCacheRebuild = false
+
+        let needsCacheRebuild = rotationAngle   != prevRotation
+                             || isNegative      != prevNegative
+                             || appliedCropRect != prevCropRect
+        if needsCacheRebuild {
+            rebuildCache()
+        } else {
+            updatePreview()
+        }
+    }
+
     // MARK: - Sidecar save / load
 
     func saveState() {
@@ -615,7 +670,6 @@ class ImageViewModel: ObservableObject {
             print("[CurveLab] saveState: no sourceURL set")
             return
         }
-        let sidecar = url.curvelabSidecar
         let state = EditingState(
             rotation: rotationAngle,
             isNegative: isNegative,
@@ -624,10 +678,19 @@ class ImageViewModel: ObservableObject {
             inputWhitePoint: inputWhitePoint,
             curves: curves
         )
+        guard let data = try? JSONEncoder().encode(state) else { return }
+
+        // Only push to undo stack if the state actually changed.
+        if let previous = lastSavedData, previous != data {
+            undoStack.append(previous)
+            if undoStack.count > maxUndoSteps { undoStack.removeFirst() }
+            canUndo = true
+        }
+        lastSavedData = data
+
         do {
-            let data = try JSONEncoder().encode(state)
-            try data.write(to: sidecar)
-            print("[CurveLab] Saved state to \(sidecar.path)")
+            try data.write(to: url.curvelabSidecar)
+            print("[CurveLab] Saved state to \(url.curvelabSidecar.path)")
         } catch {
             print("[CurveLab] saveState failed: \(error)")
         }

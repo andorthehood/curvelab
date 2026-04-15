@@ -250,6 +250,13 @@ struct ContentView: View {
                 .disabled(viewModel.originalImage == nil)
 
                 Button {
+                    viewModel.undo()
+                } label: {
+                    Label("Undo", systemImage: "arrow.uturn.backward")
+                }
+                .disabled(!viewModel.canUndo)
+
+                Button {
                     viewModel.resetCurves()
                 } label: {
                     Label("Reset Curves", systemImage: "arrow.counterclockwise")
