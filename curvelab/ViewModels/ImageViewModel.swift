@@ -1,6 +1,5 @@
 import SwiftUI
 import CoreImage
-import CoreVideo
 import Combine
 import UniformTypeIdentifiers
 
@@ -209,9 +208,9 @@ class ImageViewModel: ObservableObject {
                 return
             }
 
-            let base         = Self.buildBase(from: decoded, rotation: rotation, invert: invertNeg)
-            let imageToCache = Self.applyCrop(cropRect, to: base)
-            let cached       = Self.renderToBuffer(imageToCache, context: context)
+            let base         = RenderEngine.buildBase(from: decoded, rotation: rotation, invert: invertNeg)
+            let imageToCache = RenderEngine.crop(cropRect, to: base)
+            let cached       = RenderEngine.renderToBuffer(imageToCache, context: context)
             let histData     = cached.flatMap { HistogramData.compute(from: $0, context: context) }
 
             await MainActor.run {
@@ -321,7 +320,7 @@ class ImageViewModel: ObservableObject {
     /// Returns originalImage with rotation + optional inversion applied (no crop).
     private func preparedBase(invert: Bool? = nil) -> CIImage? {
         guard let originalImage else { return nil }
-        return Self.buildBase(from: originalImage, rotation: rotationAngle,
+        return RenderEngine.buildBase(from: originalImage, rotation: rotationAngle,
                               invert: invert ?? isNegative)
     }
 
@@ -329,7 +328,7 @@ class ImageViewModel: ObservableObject {
         guard let base = preparedBase(invert: invert) else { return }
         isLoading = true
 
-        let imageToCache = Self.applyCrop(appliedCropRect, to: base)
+        let imageToCache = RenderEngine.crop(appliedCropRect, to: base)
         let hasCrop  = appliedCropRect != nil
         let context  = ciContext
         let bufKey   = currentRenderConfig(invertOverride: invert)?.cacheKey
@@ -354,7 +353,7 @@ class ImageViewModel: ObservableObject {
         }
 
         Task.detached {
-            let cached   = Self.renderToBuffer(imageToCache, context: context)
+            let cached   = RenderEngine.renderToBuffer(imageToCache, context: context)
             let histData = cached.flatMap { HistogramData.compute(from: $0, context: context) }
             await MainActor.run {
                 if let bufKey, let cached { self.bufferCache.set(bufKey, cached) }
@@ -378,13 +377,13 @@ class ImageViewModel: ObservableObject {
         recordUndoPoint()
         guard let base = preparedBase() else { return }
         let clampedState = cropState.clamped(to: base.extent)
-        let imageToCache = Self.applyCrop(clampedState.rect, to: base)
+        let imageToCache = RenderEngine.crop(clampedState.rect, to: base)
         appliedCropRect  = clampedState.rect
         isLoading = true
         let context = ciContext
         let bufKey  = currentRenderConfig()?.cacheKey
         Task.detached {
-            let cached   = Self.renderToBuffer(imageToCache, context: context)
+            let cached   = RenderEngine.renderToBuffer(imageToCache, context: context)
             let histData = cached.flatMap { HistogramData.compute(from: $0, context: context) }
             await MainActor.run {
                 if let bufKey, let cached { self.bufferCache.set(bufKey, cached) }
@@ -427,7 +426,7 @@ class ImageViewModel: ObservableObject {
         }
 
         Task.detached {
-            let cached   = Self.renderToBuffer(base, context: context)
+            let cached   = RenderEngine.renderToBuffer(base, context: context)
             let histData = cached.flatMap { HistogramData.compute(from: $0, context: context) }
             await MainActor.run {
                 if let bufKey, let cached { self.bufferCache.set(bufKey, cached) }
@@ -717,65 +716,4 @@ class ImageViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Static helpers (nonisolated — safe to call from Task.detached)
-
-    private nonisolated static func buildBase(from image: CIImage,
-                                              rotation: Double,
-                                              invert: Bool) -> CIImage {
-        let rotated = rotatedImage(image, angle: rotation)
-        return invert ? rotated.applyingFilter("CIColorInvert") : rotated
-    }
-
-    private nonisolated static func rotatedImage(_ image: CIImage, angle: Double) -> CIImage {
-        guard angle != 0 else { return image }
-        let radians = angle * .pi / 180
-        let extent  = image.extent
-        let cx = extent.midX, cy = extent.midY
-        let rotated = image
-            .transformed(by: CGAffineTransform(translationX: -cx, y: -cy))
-            .transformed(by: CGAffineTransform(rotationAngle: CGFloat(radians)))
-            .transformed(by: CGAffineTransform(translationX: cx, y: cy))
-        let ne = rotated.extent
-        return rotated.transformed(by: CGAffineTransform(translationX: -ne.minX, y: -ne.minY))
-    }
-
-    /// Crops and normalises origin if rect is provided; returns image unchanged otherwise.
-    private nonisolated static func applyCrop(_ rect: CGRect?, to image: CIImage) -> CIImage {
-        guard let rect, rect.width >= CropState.minimumSize,
-              rect.height >= CropState.minimumSize else { return image }
-        let cropped = image.cropped(to: rect)
-        return cropped.transformed(by: CGAffineTransform(
-            translationX: -cropped.extent.minX,
-            y: -cropped.extent.minY
-        ))
-    }
-
-    private nonisolated static func renderToBuffer(_ image: CIImage,
-                                                   context: CIContext) -> CIImage? {
-        let extent = image.extent
-        guard extent.width > 0, extent.height > 0 else { return nil }
-        let width = Int(extent.width), height = Int(extent.height)
-
-        var buffer: CVPixelBuffer?
-        let attrs: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_128RGBAFloat,
-            kCVPixelBufferWidthKey: width,
-            kCVPixelBufferHeightKey: height,
-            kCVPixelBufferIOSurfacePropertiesKey: [:] as [CFString: Any]
-        ]
-        guard CVPixelBufferCreate(kCFAllocatorDefault, width, height,
-                                  kCVPixelFormatType_128RGBAFloat,
-                                  attrs as CFDictionary, &buffer) == kCVReturnSuccess,
-              let buffer else { return nil }
-
-        context.render(image, to: buffer,
-                       bounds: CGRect(x: 0, y: 0, width: width, height: height),
-                       colorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB))
-        return CIImage(cvPixelBuffer: buffer)
-    }
-
-    // Instance wrapper used by preparedBase (reads self.rotationAngle)
-    private func rotateImage(_ image: CIImage) -> CIImage {
-        Self.rotatedImage(image, angle: rotationAngle)
-    }
 }
