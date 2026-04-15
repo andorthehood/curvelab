@@ -232,26 +232,27 @@ class ImageViewModel: ObservableObject {
                                                blackPoint: inputBlackPoint, whitePoint: inputWhitePoint)
         previewImage = preview
 
-        // Post-levels, pre-curves: apply only the levels remap with identity curves
-        let levelsOnly = LUTGenerator.applyFilter(to: cachedImage, curves: CurveModel(),
-                                                  blackPoint: inputBlackPoint, whitePoint: inputWhitePoint)
+        // Derive the levels and output histograms from the cached source
+        // histogram by remapping its 256 bins — no pixel walk, no Task.detached
+        // round-trip, no stale-writeback race. `result.histogram` is already
+        // computed post-rotate/invert/crop, so composing levels and curves on
+        // top matches `LUTGenerator.applyFilter`'s order (levels → curves).
+        let source = result?.histogram
+        let lvl    = source?.remapped(throughLevels: inputBlackPoint,
+                                      whitePoint:    inputWhitePoint)
+        levelsHistogram = lvl
+        outputHistogram = lvl?.remapped(through: curves)
 
+        // Live thumbnail for the recent files bar (256 px wide). `createCGImage`
+        // is genuinely expensive, so keep it off the main actor.
         let context = ciContext
         Task.detached {
-            async let lvlHist = HistogramData.compute(from: levelsOnly, context: context)
-            async let outHist = HistogramData.compute(from: preview, context: context)
-
-            // Small live thumbnail for the recent files bar (256px wide)
             let thumbScale  = min(1.0, 256.0 / preview.extent.width)
             let thumbScaled = preview.transformed(by: CGAffineTransform(scaleX: thumbScale, y: thumbScale))
             let thumbCG     = context.createCGImage(thumbScaled, from: thumbScaled.extent,
                                                     format: .RGBA8,
                                                     colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
-
-            let (lv, out) = await (lvlHist, outHist)
             await MainActor.run {
-                self.levelsHistogram         = lv
-                self.outputHistogram         = out
                 self.activeFileLiveThumbnail = thumbCG
             }
         }
