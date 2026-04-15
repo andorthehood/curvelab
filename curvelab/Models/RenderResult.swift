@@ -5,9 +5,9 @@ import Foundation
 /// a `CIImage`, plus its histogram. `extent` is stored separately so downstream
 /// consumers can read image dimensions without touching the CIImage.
 ///
-/// Currently unused; will become the single value written back from the render
-/// pipeline in a later step, replacing the scattered `cachedImage` / `histogram`
-/// / `cropState` writes on `ImageViewModel`.
+/// Held by `ImageViewModel.result` as the single source of truth for rendered
+/// output. Views read derived accessors (`cachedImage`, `histogram`, `imageSize`)
+/// rather than the struct directly.
 struct RenderResult {
     let cachedImage: CIImage
     let histogram: HistogramData

@@ -10,7 +10,6 @@ class ImageViewModel: ObservableObject {
     @Published var curves = CurveModel()
     @Published var isLoading = false
     @Published var fileName = "CurveLab"
-    @Published var histogram: HistogramData?
     @Published var levelsHistogram: HistogramData?
     @Published var outputHistogram: HistogramData?
     @Published var rotationAngle: Double = 0
@@ -26,18 +25,32 @@ class ImageViewModel: ObservableObject {
     @Published private(set) var sourceURL: URL? = nil
     @Published private(set) var activeFileLiveThumbnail: CGImage? = nil
 
+    /// Latest successfully rendered output: the float32 buffer CIImage, its
+    /// histogram, and extent. Single source of truth — replaces the separate
+    /// `cachedImage` + `histogram` fields we used to carry.
+    @Published private(set) var result: RenderResult?
+
     /// Called after the user selects a new file (panel or recent-files click) but
     /// before `sourceURL` changes — ContentView uses this to save the outgoing thumbnail.
     var willLoadNewFile: (() -> Void)? = nil
 
+    // MARK: - Derived accessors (from `result`)
+
+    /// Post-cache-rebuild histogram. Observed by views for levels / curve plots.
+    var histogram: HistogramData? { result?.histogram }
+
+    /// Pixel dimensions of the most recent render, or `.zero` before any load.
     var imageSize: CGSize {
-        guard let ext = cachedImage?.extent else { return .zero }
+        guard let ext = result?.extent else { return .zero }
         return CGSize(width: ext.width, height: ext.height)
     }
 
-    var hasCachedImage: Bool { cachedImage != nil }
+    var hasCachedImage: Bool { result != nil }
 
-    private var cachedImage: CIImage?
+    /// The float32 buffer CIImage fed into LUT application and thumbnails.
+    /// Private because only this file's updatePreview / renderThumbnails read it.
+    private var cachedImage: CIImage? { result?.cachedImage }
+
     private var appliedCropRect: CGRect? = nil
 
     // Suppresses the $isNegative → rebuildCache sink during import
@@ -169,11 +182,10 @@ class ImageViewModel: ObservableObject {
 
             // 3. Commit all state on MainActor (Task inherits MainActor from self).
             self.originalImage   = original
-            self.cachedImage     = result.cachedImage
+            self.result          = result
             self.rotationAngle   = rotation
             self.isNegative      = invertNeg
             self.appliedCropRect = cropRect
-            self.histogram       = result.histogram
             self.cropState       = cropRect != nil
                 ? CropState(rect: result.extent, isActive: true)
                 : CropState.full(for: result.cachedImage)
@@ -285,8 +297,7 @@ class ImageViewModel: ObservableObject {
                 // completing render will clear it.
                 return
             }
-            self.cachedImage  = result.cachedImage
-            self.histogram    = result.histogram
+            self.result       = result
             self.cropState    = hasCrop
                 ? CropState(rect: result.extent, isActive: true)
                 : CropState.full(for: result.cachedImage)
@@ -313,8 +324,7 @@ class ImageViewModel: ObservableObject {
         guard let config = currentRenderConfig() else { return }
         Task { [pipeline] in
             guard let result = await pipeline.render(config, from: original) else { return }
-            self.cachedImage  = result.cachedImage
-            self.histogram    = result.histogram
+            self.result       = result
             self.cropState    = CropState(rect: result.extent, isActive: true)
             self.cacheVersion = UUID()
             self.updatePreview()
@@ -332,8 +342,7 @@ class ImageViewModel: ObservableObject {
         guard let config = currentRenderConfig() else { return }
         Task { [pipeline] in
             guard let result = await pipeline.render(config, from: original) else { return }
-            self.cachedImage  = result.cachedImage
-            self.histogram    = result.histogram
+            self.result       = result
             self.cropState    = CropState.full(for: result.cachedImage)
             self.cacheVersion = UUID()
             self.updatePreview()
